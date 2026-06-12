@@ -115,21 +115,23 @@ function bandColor(value, thresholds, mode, startingBalance) {
   return "#FF6B6B";
 }
 
-// ─── Demo Data ────────────────────────────────────────────────────────────────
+// ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const DEMO_ACCOUNTS = [
-  { last4: "1234", label: "Chase Checking",   role: "income",  incomeRank: 0 },
-  { last4: "4321", label: "Savings Backup",   role: "income",  incomeRank: 1 },
-  { last4: "5678", label: "Capital One Visa", role: "spending", incomeRank: null },
-  { last4: "9876", label: "Amex Gold",        role: "spending", incomeRank: null },
-];
-const DEMO_SNAPSHOTS = [
-  { id: 1, accountLast4: "1234", balance: 4000.00, timestamp: new Date(Date.now() - 7200000).toISOString(), source: "manual" },
-  { id: 2, accountLast4: "4321", balance: 8000.00, timestamp: new Date(Date.now() - 7100000).toISOString(), source: "manual" },
-  { id: 3, accountLast4: "5678", balance: 500.00,  timestamp: new Date(Date.now() - 5400000).toISOString(), source: "sms"    },
-  { id: 4, accountLast4: "9876", balance: 200.00,  timestamp: new Date(Date.now() - 3600000).toISOString(), source: "manual" },
-];
-const DEFAULT_THRESHOLDS = { hi: "60", mid: "30", lo: "15" };
+function load(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+// ─── Defaults (used only on first launch) ────────────────────────────────────
+
+const DEFAULT_ACCOUNTS       = [];
+const DEFAULT_SNAPSHOTS      = [];
+const DEFAULT_THRESHOLDS     = { hi: "60", mid: "30", lo: "15" };
 const DEFAULT_THRESHOLD_MODE = "percent"; // "dollar" | "percent"
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -632,10 +634,10 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
 
 export default function App() {
   const [tab, setTab]               = useState("home");
-  const [accounts, setAccounts]     = useState(DEMO_ACCOUNTS);
-  const [snapshots, setSnapshots]   = useState(DEMO_SNAPSHOTS);
-  const [thresholds, setThresholds] = useState(DEFAULT_THRESHOLDS);
-  const [thresholdMode, setThresholdMode] = useState(DEFAULT_THRESHOLD_MODE);
+  const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
+  const [snapshots, setSnapshots]   = useState(() => load("s2s_snapshots",     DEFAULT_SNAPSHOTS));
+  const [thresholds, setThresholds] = useState(() => load("s2s_thresholds",    DEFAULT_THRESHOLDS));
+  const [thresholdMode, setThresholdMode] = useState(() => load("s2s_tmode",   DEFAULT_THRESHOLD_MODE));
   const [heroKey, setHeroKey]       = useState(0);
   const [smsText, setSmsText]       = useState("");
   const [smsResult, setSmsResult]   = useState(null);
@@ -643,6 +645,12 @@ export default function App() {
   const [manualBal, setManualBal]   = useState("");
   const [toast, setToast]           = useState(null);
   const toastRef = useRef();
+
+  // Persist to localStorage via wrapper setters below
+  function setAccountsP(v)      { const val = typeof v === "function" ? v(accounts)  : v; save("s2s_accounts",   val); setAccounts(val);      }
+  function setSnapshotsP(v)     { const val = typeof v === "function" ? v(snapshots) : v; save("s2s_snapshots",  val); setSnapshots(val);     }
+  function setThresholdsP(v)    { const val = typeof v === "function" ? v(thresholds): v; save("s2s_thresholds", val); setThresholds(val);    }
+  function setThresholdModeP(v) { const val = typeof v === "function" ? v(thresholdMode):v; save("s2s_tmode",   val); setThresholdMode(val); }
 
   function showToast(msg) {
     setToast(null);
@@ -668,7 +676,7 @@ export default function App() {
 
   function ingestBalance(last4, balance, source) {
     if (isDuplicate(snapshots, last4, balance, source)) return false;
-    setSnapshots(prev => [{ id: Date.now(), accountLast4: last4, balance, timestamp: nowISO(), source }, ...prev]);
+    setSnapshotsP(prev => [{ id: Date.now(), accountLast4: last4, balance, timestamp: nowISO(), source }, ...prev]);
     setHeroKey(k => k + 1);
     return true;
   }
@@ -678,7 +686,7 @@ export default function App() {
     if (!result) { setSmsResult({ ok:false, msg:"Couldn't parse a balance. Check the format." }); return; }
     if (!accounts.find(a => a.last4 === result.accountLast4)) {
       const nextRank = accounts.filter(a => a.role === "income").length;
-      setAccounts(prev => [...prev, { last4: result.accountLast4, label: result.label + " •" + result.accountLast4, role: "income", incomeRank: nextRank }]);
+      setAccountsP(prev => [...prev, { last4: result.accountLast4, label: result.label + " •" + result.accountLast4, role: "income", incomeRank: nextRank }]);
     }
     if (!ingestBalance(result.accountLast4, result.balance, "sms")) {
       setSmsResult({ ok:false, msg:"Duplicate — same balance within 2 minutes." }); return;
@@ -697,7 +705,7 @@ export default function App() {
   }
 
   function handleSetRole(last4, newRole) {
-    setAccounts(prev => {
+    setAccountsP(prev => {
       const updated = prev.map(a => {
         if (a.last4 !== last4) return a;
         if (newRole === "income") {
@@ -723,7 +731,7 @@ export default function App() {
   }
 
   function handleReorder(last4, dir) {
-    setAccounts(prev => {
+    setAccountsP(prev => {
       const income = prev.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
       const idx = income.findIndex(a => a.last4 === last4);
       const swapIdx = dir === "up" ? idx - 1 : idx + 1;
@@ -739,14 +747,14 @@ export default function App() {
   }
 
   function handleRemoveAccount(last4) {
-    setAccounts(prev => rerank(prev.filter(a => a.last4 !== last4)));
+    setAccountsP(prev => rerank(prev.filter(a => a.last4 !== last4)));
     showToast("Account removed");
   }
 
   function handleAddAccount(l4, label, role) {
     if (accounts.find(a => a.last4 === l4)) { showToast("Account already exists"); return; }
     const nextRank = role === "income" ? accounts.filter(a => a.role === "income").length : null;
-    setAccounts(prev => [...prev, { last4: l4, label, role, incomeRank: nextRank }]);
+    setAccountsP(prev => [...prev, { last4: l4, label, role, incomeRank: nextRank }]);
     showToast("Account added");
   }
 
@@ -784,7 +792,7 @@ export default function App() {
             accounts={accounts} thresholds={thresholds} thresholdMode={thresholdMode}
             onSetRole={handleSetRole} onReorder={handleReorder}
             onRemoveAccount={handleRemoveAccount} onAddAccount={handleAddAccount}
-            onSaveThresholds={setThresholds} onSaveThresholdMode={setThresholdMode}
+            onSaveThresholds={setThresholdsP} onSaveThresholdMode={setThresholdModeP}
           />
         )}
 
