@@ -21,21 +21,57 @@ const SOURCES = { manual: "Manual", sms: "SMS", api: "API" };
 
 // ─── SMS Parsing ──────────────────────────────────────────────────────────────
 
+// Patterns that yield a last4 digit string directly
 const SMS_PATTERNS = [
+  // PNC style: "account ending in x1234" — x's represent masked digits, real last4 follows
+  { regex: /account\s+ending\s+in\s+x+(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "PNC" },
+  // Citi style: "acct ending in 1234 has a balance of $X"
+  { regex: /acct\s+ending\s+in\s+(\d{4})[^$]*balance\s+of\s+\$([0-9,]+\.\d{2})/i, label: "Citi" },
+  // Generic "account ending in 1234 ... $X" or "account ending 1234 ... $X"
+  { regex: /account\s+ending\s+(?:in\s+)?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
+  // Chase/generic: "Acct *1234 balance: $X"
   { regex: /Acct\s*\*?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Chase" },
+  // Capital One: "Your balance is $X for account ending in 1234"
   { regex: /balance\s+is\s+\$([0-9,]+\.\d{2})\s+for\s+account\s+ending\s+in\s+(\d{4})/i, label: "Capital One", flip: true },
-  { regex: /[Aa]ccount\s+ending\s+(?:in\s+)?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
-  { regex: /account\s*\*?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
+  // Generic: "balance of $X ... 1234" (Citi fallback, others)
   { regex: /balance\s+of\s+\$([0-9,]+\.\d{2})[^0-9]*(\d{4})/i, label: "Bank", flip: true },
+  // Generic account *1234
+  { regex: /account\s*\*?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
 ];
+
+// Card-name patterns — no last4 digits in the message; returns { cardName, balance }
+const CARD_NAME_PATTERNS = [
+  // "Chase Sapphire Reserve Visa: Your balance of $296.93 ..."
+  // "Chase Freedom Unlimited: Your balance of $X ..."
+  { regex: /(Chase\s+[A-Za-z ]+?)(?:Visa|Mastercard)?:\s*Your\s+balance\s+of\s+\$([0-9,]+\.\d{2})/i, label: "Chase" },
+  // Generic: "CardName: ... balance of $X" or "CardName: ... balance: $X"
+  { regex: /^([A-Za-z ]+?):\s*.*balance\s+(?:of|is)?:?\s*\$([0-9,]+\.\d{2})/im, label: "Card" },
+];
+
+// Returns:
+//   { type: "digits",   accountLast4, balance, label }   — known account, save immediately
+//   { type: "cardname", cardName,     balance, label }   — no digits, needs account confirmation
+//   null — unrecognised
 function parseSMS(text) {
+  // Try digit-bearing patterns first
   for (const p of SMS_PATTERNS) {
     const m = text.match(p.regex);
     if (m) {
-      const last4   = p.flip ? m[2] : m[1];
-      const balStr  = p.flip ? m[1] : m[2];
+      const last4  = p.flip ? m[2] : m[1];
+      const balStr = p.flip ? m[1] : m[2];
       const balance = parseFloat(balStr.replace(/,/g, ""));
-      if (!isNaN(balance) && last4.length === 4) return { accountLast4: last4, balance, label: p.label };
+      if (!isNaN(balance) && last4.length === 4)
+        return { type: "digits", accountLast4: last4, balance, label: p.label };
+    }
+  }
+  // Try card-name patterns (no digits)
+  for (const p of CARD_NAME_PATTERNS) {
+    const m = text.match(p.regex);
+    if (m) {
+      const cardName = m[1].trim();
+      const balance  = parseFloat(m[2].replace(/,/g, ""));
+      if (!isNaN(balance) && cardName.length > 1)
+        return { type: "cardname", cardName, balance, label: p.label };
     }
   }
   return null;
@@ -187,6 +223,7 @@ const S = `
   .sms-result { margin-top:10px; font-size:13px; padding:10px 12px; border-radius:8px; }
   .sms-result.success { background:#00D4AA12; color:#00D4AA; }
   .sms-result.error   { background:#FF6B6B12; color:#FF6B6B; }
+  .sms-result .select-input { margin-bottom:0; font-size:13px; padding:9px 11px; }
 
   /* manual entry */
   .manual-panel { margin:0 16px 28px; background:#0D1F35; border:1px dashed #1A3A5A; border-radius:14px; padding:18px; }
@@ -300,7 +337,7 @@ const IconSettings = () => (
 
 function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
                       thresholdMode, heroKey, smsText, setSmsText, smsResult,
-                      onParseSMS, manualAcct, setManualAcct, manualBal,
+                      onParseSMS, onConfirmCard, manualAcct, setManualAcct, manualBal,
                       setManualBal, onManualSave, latestBalance, firstBalance }) {
 
   const incomeAccts  = accounts.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
@@ -427,7 +464,21 @@ function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
           placeholder={"Paste a balance alert, e.g.:\nAcct *1234 balance: $4,000.00"}
           value={smsText} onChange={e => setSmsText(e.target.value)} />
         <button className="sms-parse-btn" onClick={onParseSMS}>Parse & Save Balance</button>
-        {smsResult && <div className={`sms-result ${smsResult.ok ? "success" : "error"}`}>{smsResult.msg}</div>}
+        {smsResult && smsResult.ok === "confirm" ? (
+          <div className="sms-result" style={{ background:"#9B88FF14", color:"#C8D8E8" }}>
+            <div style={{ marginBottom:10 }}>{smsResult.msg}</div>
+            <select className="select-input" style={{ marginBottom:8 }}
+              defaultValue=""
+              onChange={e => e.target.value && onConfirmCard(e.target.value, smsResult.balance)}>
+              <option value="" disabled>Select account…</option>
+              {accounts.map(a => (
+                <option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>
+              ))}
+            </select>
+          </div>
+        ) : smsResult ? (
+          <div className={`sms-result ${smsResult.ok ? "success" : "error"}`}>{smsResult.msg}</div>
+        ) : null}
       </div>
 
       {/* Manual */}
@@ -684,6 +735,19 @@ export default function App() {
   function handleParseSMS() {
     const result = parseSMS(smsText.trim());
     if (!result) { setSmsResult({ ok:false, msg:"Couldn't parse a balance. Check the format." }); return; }
+
+    if (result.type === "cardname") {
+      // No digits found — ask user to pick which account this card maps to
+      setSmsResult({
+        ok: "confirm",
+        cardName: result.cardName,
+        balance: result.balance,
+        msg: `Found "${result.cardName}" — ${fmt(result.balance)}. Which account is this?`,
+      });
+      return;
+    }
+
+    // Normal digits path
     if (!accounts.find(a => a.last4 === result.accountLast4)) {
       const nextRank = accounts.filter(a => a.role === "income").length;
       setAccountsP(prev => [...prev, { last4: result.accountLast4, label: result.label + " •" + result.accountLast4, role: "income", incomeRank: nextRank }]);
@@ -692,6 +756,15 @@ export default function App() {
       setSmsResult({ ok:false, msg:"Duplicate — same balance within 2 minutes." }); return;
     }
     setSmsResult({ ok:true, msg:`Saved: •${result.accountLast4} → ${fmt(result.balance)}` });
+    setSmsText("");
+    showToast("Balance updated");
+  }
+
+  function handleConfirmCardAccount(last4, balance) {
+    if (!ingestBalance(last4, balance, "sms")) {
+      setSmsResult({ ok:false, msg:"Duplicate — same balance within 2 minutes." }); return;
+    }
+    setSmsResult({ ok:true, msg:`Saved: •${last4} → ${fmt(balance)}` });
     setSmsText("");
     showToast("Balance updated");
   }
@@ -778,6 +851,7 @@ export default function App() {
             heroKey={heroKey}
             smsText={smsText} setSmsText={setSmsText}
             smsResult={smsResult} onParseSMS={handleParseSMS}
+            onConfirmCard={handleConfirmCardAccount}
             manualAcct={manualAcct} setManualAcct={setManualAcct}
             manualBal={manualBal} setManualBal={setManualBal}
             onManualSave={handleManualSave}
