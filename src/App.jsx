@@ -151,6 +151,40 @@ function bandColor(value, thresholds, mode, startingBalance) {
   return "#FF6B6B";
 }
 
+// ─── Due Date Helpers ────────────────────────────────────────────────────────
+
+// Returns days until due for a fixed day-of-month (handles month wrap)
+function daysUntilDue(dayOfMonth) {
+  if (!dayOfMonth) return null;
+  const today = new Date();
+  const thisMonth = new Date(today.getFullYear(), today.getMonth(), dayOfMonth);
+  const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, dayOfMonth);
+  const target = thisMonth >= today ? thisMonth : nextMonth;
+  return Math.ceil((target - today) / (1000 * 60 * 60 * 24));
+}
+
+// Returns the next due date as a short string e.g. "Jul 15"
+function nextDueDateStr(dayOfMonth) {
+  if (!dayOfMonth) return null;
+  const today = new Date();
+  const thisMonth = new Date(today.getFullYear(), today.getMonth(), dayOfMonth);
+  const nextMonth = new Date(today.getFullYear(), today.getMonth() + 1, dayOfMonth);
+  const target = thisMonth >= today ? thisMonth : nextMonth;
+  return target.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// Returns color based on days until due and user thresholds
+function dueColor(daysLeft, dt) {
+  if (daysLeft === null) return null;
+  const g = parseInt(dt.green);
+  const y = parseInt(dt.yellow);
+  const r = parseInt(dt.red);
+  if (daysLeft >= g)  return "#00D4AA";
+  if (daysLeft >= y)  return "#F5C842";
+  if (daysLeft >= r)  return "#F5A623";
+  return "#FF6B6B";
+}
+
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
 function load(key, fallback) {
@@ -169,6 +203,7 @@ const DEFAULT_ACCOUNTS       = [];
 const DEFAULT_SNAPSHOTS      = [];
 const DEFAULT_THRESHOLDS     = { hi: "60", mid: "30", lo: "15" };
 const DEFAULT_THRESHOLD_MODE = "percent"; // "dollar" | "percent"
+const DEFAULT_DUE_THRESHOLDS = { green: "14", yellow: "7", red: "3" }; // days until due
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -203,6 +238,7 @@ const S = `
   .account-list { padding:0 16px; margin-bottom:28px; display:flex; flex-direction:column; gap:8px; }
   .account-card { background:#111E33; border-radius:14px; padding:16px 18px; display:flex; justify-content:space-between; align-items:center; border:1px solid #1A2E4A; }
   .account-card.rank-0 { border-color:#00D4AA28; background:#0D1F35; }
+  .account-card.due    { border-left-width:3px !important; padding-left:15px !important; }
   .account-card.rank-1 { border-color:#7B68EE28; background:#0E1D35; }
   .account-card-left { display:flex; align-items:center; gap:12px; }
   .acct-rank-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
@@ -338,7 +374,7 @@ const IconSettings = () => (
 function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
                       thresholdMode, heroKey, smsText, setSmsText, smsResult,
                       onParseSMS, onConfirmCard, manualAcct, setManualAcct, manualBal,
-                      setManualBal, onManualSave, latestBalance, firstBalance }) {
+                      setManualBal, onManualSave, latestBalance, firstBalance, dueThresholds }) {
 
   const incomeAccts  = accounts.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
   const spendingAccts = accounts.filter(a => a.role === "spending");
@@ -433,13 +469,32 @@ function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
         <div className="account-list">
           {spendingAccts.map(a => {
             const b = latestBalance(a.last4);
+            const days = daysUntilDue(a.dueDay);
+            const dateStr = nextDueDateStr(a.dueDay);
+            const dc = dueColor(days, dueThresholds);
             return (
-              <div className="account-card" key={a.last4}>
+              <div className="account-card" key={a.last4}
+                style={{ borderLeft: dc ? `3px solid ${dc}` : "1px solid #1A2E4A",
+                         paddingLeft: dc ? 15 : 17 }}>
                 <div className="account-card-left">
-                  <div className="acct-rank-dot" style={{ background: "#F5A623" }} />
                   <div>
                     <div className="account-label">{a.label}</div>
                     <div className="account-last4">•••• {a.last4}</div>
+                    {dateStr && (
+                      <span className="rank-badge" style={{
+                        background: dc ? dc + "20" : "#1A2E4A",
+                        color: dc ?? "#4A6280",
+                        marginTop: 4,
+                      }}>
+                        Due {dateStr}
+                        {days !== null && ` · ${days}d`}
+                      </span>
+                    )}
+                    {!dateStr && (
+                      <span className="rank-badge" style={{ background:"#1A2E4A", color:"#2E4A6A" }}>
+                        No due date
+                      </span>
+                    )}
                   </div>
                 </div>
                 {b !== null
@@ -533,7 +588,8 @@ function HistoryScreen({ snapshots, accounts }) {
 
 function SettingsScreen({ accounts, thresholds, thresholdMode,
                           onSetRole, onReorder, onRemoveAccount,
-                          onAddAccount, onSaveThresholds, onSaveThresholdMode }) {
+                          onAddAccount, onSaveThresholds, onSaveThresholdMode,
+                          dueThresholds, onSaveDueThresholds, onSetDueDay }) {
   const [newLabel, setNewLabel] = useState("");
   const [newLast4, setNewLast4] = useState("");
   const [newRole,  setNewRole]  = useState("income");
@@ -542,6 +598,9 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
   const [tMid, setTMid] = useState(thresholds.mid);
   const [tLo,  setTLo]  = useState(thresholds.lo);
   const [tMode, setTMode] = useState(thresholdMode);
+  const [dGreen,  setDGreen]  = useState(dueThresholds.green);
+  const [dYellow, setDYellow] = useState(dueThresholds.yellow);
+  const [dRed,    setDRed]    = useState(dueThresholds.red);
 
   const incomeAccts  = accounts.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
   const spendingAccts = accounts.filter(a => a.role === "spending");
@@ -556,6 +615,7 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
   function handleSave() {
     onSaveThresholds({ hi: tHi, mid: tMid, lo: tLo });
     onSaveThresholdMode(tMode);
+    onSaveDueThresholds({ green: dGreen, yellow: dYellow, red: dRed });
   }
 
   const unit = tMode === "percent" ? "%" : "$";
@@ -597,6 +657,33 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
         <button className="threshold-save" onClick={handleSave}>Save levels</button>
       </div>
 
+      {/* ── Due Date Thresholds ── */}
+      <div className="section-label">Payment Due Colors</div>
+      <div className="threshold-panel">
+        <div className="threshold-title">Days Until Due</div>
+        <div className="threshold-hint">
+          Each card shows a color strip and badge based on how many days until its bill is due.
+        </div>
+        <div className="band-preview">
+          {["#00D4AA","#F5C842","#F5A623","#FF6B6B"].map(c => <div key={c} className="band-seg" style={{ background:c }} />)}
+        </div>
+        {[
+          { color:"#00D4AA", val:dGreen,  set:setDGreen,  ph:"e.g. 14" },
+          { color:"#F5C842", val:dYellow, set:setDYellow, ph:"e.g. 7"  },
+          { color:"#F5A623", val:dRed,    set:setDRed,    ph:"e.g. 3"  },
+        ].map(({ color, val, set, ph }) => (
+          <div className="threshold-row" key={color}>
+            <div className="threshold-swatch" style={{ background:color }} />
+            <input className="threshold-input" placeholder={ph} value={val}
+              onChange={e => set(e.target.value)} type="number" inputMode="numeric" />
+            <span className="threshold-unit">days</span>
+          </div>
+        ))}
+        <div style={{ fontSize:11, color:"#2E4A6A", marginBottom:12, paddingLeft:22 }}>
+          Below the last level shows red. Changes save with the "Save levels" button above.
+        </div>
+      </div>
+
       {/* ── Income Accounts (ordered) ── */}
       <div className="section-label">Income Accounts</div>
       <div className="settings-section">
@@ -633,17 +720,34 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
           <div className="settings-row"><div className="settings-row-sub">No spending accounts yet.</div></div>
         )}
         {spendingAccts.map(a => (
-          <div className="settings-row" key={a.last4}>
-            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-              <div style={{ width:8, height:8, borderRadius:"50%", background:"#F5A623", flexShrink:0 }} />
-              <div>
-                <div className="settings-row-label">{a.label}</div>
-                <div className="settings-row-sub">•••• {a.last4}</div>
+          <div className="settings-row" key={a.last4} style={{ flexDirection:"column", alignItems:"stretch", gap:10 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <div style={{ width:8, height:8, borderRadius:"50%", background:"#F5A623", flexShrink:0 }} />
+                <div>
+                  <div className="settings-row-label">{a.label}</div>
+                  <div className="settings-row-sub">•••• {a.last4}</div>
+                </div>
+              </div>
+              <div style={{ display:"flex", gap:6 }}>
+                <button className="pill pill-teal" onClick={() => onSetRole(a.last4, "income")}>→ Income</button>
+                <button className="pill pill-red"  onClick={() => onRemoveAccount(a.last4)}>Remove</button>
               </div>
             </div>
-            <div style={{ display:"flex", gap:6 }}>
-              <button className="pill pill-teal" onClick={() => onSetRole(a.last4, "income")}>→ Income</button>
-              <button className="pill pill-red"  onClick={() => onRemoveAccount(a.last4)}>Remove</button>
+            <div style={{ display:"flex", alignItems:"center", gap:10, paddingLeft:18 }}>
+              <span style={{ fontSize:12, color:"#4A6280", whiteSpace:"nowrap" }}>Due day</span>
+              <input
+                className="text-input"
+                style={{ maxWidth:80, padding:"7px 10px", fontSize:13 }}
+                placeholder="e.g. 15"
+                type="number"
+                inputMode="numeric"
+                min="1" max="31"
+                defaultValue={a.dueDay ?? ""}
+                key={a.last4 + "_due"}
+                onBlur={e => onSetDueDay(a.last4, e.target.value || null)}
+              />
+              <span style={{ fontSize:12, color:"#2E4A6A" }}>of each month</span>
             </div>
           </div>
         ))}
@@ -673,7 +777,7 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
         <div className="settings-row">
           <div>
             <div className="settings-row-label">Safe2Spend</div>
-            <div className="settings-row-sub">v0.3 · Waterfall income · $ or % thresholds</div>
+            <div className="settings-row-sub">v0.4 · Waterfall · $ or % · Due date colors</div>
           </div>
         </div>
       </div>
@@ -689,6 +793,7 @@ export default function App() {
   const [snapshots, setSnapshots]   = useState(() => load("s2s_snapshots",     DEFAULT_SNAPSHOTS));
   const [thresholds, setThresholds] = useState(() => load("s2s_thresholds",    DEFAULT_THRESHOLDS));
   const [thresholdMode, setThresholdMode] = useState(() => load("s2s_tmode",   DEFAULT_THRESHOLD_MODE));
+  const [dueThresholds, setDueThresholds] = useState(() => load("s2s_due_thr", DEFAULT_DUE_THRESHOLDS));
   const [heroKey, setHeroKey]       = useState(0);
   const [smsText, setSmsText]       = useState("");
   const [smsResult, setSmsResult]   = useState(null);
@@ -702,6 +807,7 @@ export default function App() {
   function setSnapshotsP(v)     { const val = typeof v === "function" ? v(snapshots) : v; save("s2s_snapshots",  val); setSnapshots(val);     }
   function setThresholdsP(v)    { const val = typeof v === "function" ? v(thresholds): v; save("s2s_thresholds", val); setThresholds(val);    }
   function setThresholdModeP(v) { const val = typeof v === "function" ? v(thresholdMode):v; save("s2s_tmode",   val); setThresholdMode(val); }
+  function setDueThresholdsP(v) { const val = typeof v === "function" ? v(dueThresholds):v; save("s2s_due_thr", val); setDueThresholds(val); }
 
   function showToast(msg) {
     setToast(null);
@@ -824,6 +930,10 @@ export default function App() {
     showToast("Account removed");
   }
 
+  function handleSetDueDay(last4, day) {
+    setAccountsP(prev => prev.map(a => a.last4 === last4 ? { ...a, dueDay: day ? parseInt(day) : null } : a));
+  }
+
   function handleAddAccount(l4, label, role) {
     if (accounts.find(a => a.last4 === l4)) { showToast("Account already exists"); return; }
     const nextRank = role === "income" ? accounts.filter(a => a.role === "income").length : null;
@@ -855,7 +965,7 @@ export default function App() {
             manualAcct={manualAcct} setManualAcct={setManualAcct}
             manualBal={manualBal} setManualBal={setManualBal}
             onManualSave={handleManualSave}
-            latestBalance={latestBalance} firstBalance={firstBalance}
+            latestBalance={latestBalance} firstBalance={firstBalance} dueThresholds={dueThresholds}
           />
         )}
         {tab === "history" && (
@@ -867,6 +977,8 @@ export default function App() {
             onSetRole={handleSetRole} onReorder={handleReorder}
             onRemoveAccount={handleRemoveAccount} onAddAccount={handleAddAccount}
             onSaveThresholds={setThresholdsP} onSaveThresholdMode={setThresholdModeP}
+            dueThresholds={dueThresholds} onSaveDueThresholds={setDueThresholdsP}
+            onSetDueDay={handleSetDueDay}
           />
         )}
 
