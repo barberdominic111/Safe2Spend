@@ -23,10 +23,16 @@ const SOURCES = { manual: "Manual", sms: "SMS", api: "API" };
 
 // Patterns that yield a last4 digit string directly
 const SMS_PATTERNS = [
-  // PNC style: "account ending in x1234" — x's represent masked digits, real last4 follows
+  // PNC actual format: "PNC credit card x1234 balance as of MM/DD/YY is $X"
+  { regex: /x(\d{4})\s+balance\s+as\s+of\s+[\d/]+\s+is\s+\$([0-9,]+\.\d{2})/i, label: "PNC" },
+  // PNC fallback: anything with x1234 ... is $X
+  { regex: /x(\d{4})[^$]*is\s+\$([0-9,]+\.\d{2})/i, label: "PNC" },
+  // PNC old style: "account ending in x1234 ... $X"
   { regex: /account\s+ending\s+in\s+x+(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "PNC" },
   // Citi style: "acct ending in 1234 has a balance of $X"
   { regex: /acct\s+ending\s+in\s+(\d{4})[^$]*balance\s+of\s+\$([0-9,]+\.\d{2})/i, label: "Citi" },
+  // Citi fallback: "acct ending in 1234 ... $X"
+  { regex: /acct\s+ending\s+in\s+(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Citi" },
   // Generic "account ending in 1234 ... $X" or "account ending 1234 ... $X"
   { regex: /account\s+ending\s+(?:in\s+)?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
   // Chase/generic: "Acct *1234 balance: $X"
@@ -37,6 +43,8 @@ const SMS_PATTERNS = [
   { regex: /balance\s+of\s+\$([0-9,]+\.\d{2})[^0-9]*(\d{4})/i, label: "Bank", flip: true },
   // Generic account *1234
   { regex: /account\s*\*?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
+  // Broad fallback: any x1234 ... $X pattern
+  { regex: /x(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
 ];
 
 // Card-name patterns — no last4 digits in the message; returns { cardName, balance }
