@@ -45,6 +45,10 @@ const SMS_PATTERNS = [
   { regex: /account\s*\*?(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
   // Broad fallback: any x1234 ... $X pattern
   { regex: /x(\d{4})[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
+  // Capital One: "…(1234) bal is $X" or "(1234) balance is $X"
+  { regex: /\((\d{4})\)\s+bal(?:ance)?\s+is\s+\$([0-9,]+\.\d{2})/i, label: "Capital One" },
+  // Broad parenthesis fallback: (1234) ... $X
+  { regex: /\((\d{4})\)[^$]*\$([0-9,]+\.\d{2})/i, label: "Bank" },
 ];
 
 // Card-name patterns — no last4 digits in the message; returns { cardName, balance }
