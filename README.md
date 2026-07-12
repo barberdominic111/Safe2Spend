@@ -2,37 +2,32 @@
 
 > "How much money can I safely spend right now?"
 
-A privacy-focused balance tracker. No bank logins, no transaction history — just your current balances and a single number.
+A privacy-focused cash flow app. No bank logins required. All data stays on your device.
 
 ---
 
-## Project Structure
+## Folder structure
 
 ```
 safe2spend/
 ├── index.html
-├── vite.config.js
 ├── package.json
+├── vite.config.js
+├── .gitignore
 ├── public/
 │   └── favicon.svg
 └── src/
     ├── main.jsx
     ├── index.css
-    └── App.jsx        ← main app (safe2spend.jsx renamed)
+    └── App.jsx        ← entire app lives here
 ```
 
 ---
 
-## Local Setup
+## Run locally
 
 ```bash
-# 1. Create the folder and copy files in
-mkdir safe2spend && cd safe2spend
-
-# 2. Install dependencies
 npm install
-
-# 3. Run locally
 npm run dev
 ```
 
@@ -42,35 +37,57 @@ Open http://localhost:5173 in your browser.
 
 ## Deploy to Vercel
 
-### Option A — Vercel CLI (fastest)
+### Option A — push to GitHub, then connect Vercel
+```bash
+git init
+git add .
+git commit -m "safe2spend v1.0"
+gh repo create safe2spend --public --push --source=.
+```
+Then go to vercel.com → Add New Project → import the repo → Deploy.
+
+### Option B — Vercel CLI
 ```bash
 npm install -g vercel
 vercel
 ```
-Follow the prompts. It will give you a live URL in ~30 seconds.
-On first run it asks: link to existing project? → **N**. It creates one.
 
-### Option B — GitHub + Vercel dashboard
+---
+
+## Update an existing deployment
+
 ```bash
-git init
 git add .
-git commit -m "init safe2spend"
-gh repo create safe2spend --public --push --source=.
+git commit -m "update"
+git push
 ```
-Then go to vercel.com → Add New Project → import your GitHub repo → Deploy.
+Vercel auto-deploys on every push to main.
 
 ---
 
-## Test on Android
+## Use on Android
 
-1. Open the Vercel URL in **Chrome on Android**
-2. Tap the three-dot menu → **Add to Home Screen**
-3. It installs as a PWA — full screen, no browser chrome
+1. Open the Vercel URL in Chrome on Android
+2. Three-dot menu → Add to Home Screen
+3. Installs as a full-screen PWA
+
+## Use on iOS
+
+SMS auto-reading is not available on iOS. Use the Paste SMS panel on the Spending tab to manually paste balance alerts from your bank.
 
 ---
 
-## Notes
+## Account roles
 
-- All data is in-memory only (resets on refresh). Persistent storage via localStorage or a backend is a future step.
-- SMS paste works on any device. Automatic SMS reading requires Android + a native app wrapper (future V2).
-- The Plaid version (direct bank connections) is a separate project — see the prompt in your Claude thread.
+| Role | What it is |
+|------|-----------|
+| Spending | Your discretionary bank account(s). Safe to Spend = these minus credit cards. |
+| Bills | Dedicated account for bill obligations. Shown on Bills tab scale. |
+| Credit Card | Balances subtracted from Spending accounts. |
+| Holding | Investment/brokerage accounts. Visible on Invest tab only. |
+
+---
+
+## Data & privacy
+
+All data is stored locally in your browser via `localStorage`. Nothing is sent to any server. Vercel only serves the app files — it never sees your financial data.
