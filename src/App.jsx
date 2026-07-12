@@ -100,45 +100,51 @@ function isDuplicate(snapshots, last4, balance, source) {
 }
 
 // ─── Account Roles ────────────────────────────────────────────────────────────
-// role: "income" | "spending"
+// role: "spending_bank" | "credit_card" | "bills_bank" | "holding"
 // incomeRank: 0 = Primary, 1 = Secondary, 2 = Tertiary, etc. (null for spending)
 // incomeLabel: custom label e.g. "Primary", "Secondary", "Backup"
 
 const RANK_NAMES = ["Primary", "Secondary", "Tertiary", "Quaternary"];
 function rankName(r) { return RANK_NAMES[r] ?? `#${r + 1}`; }
 
-// ─── Waterfall Safe-to-Spend ──────────────────────────────────────────────────
-// Spending obligations are subtracted from income accounts in rank order.
-// Returns { safeToSpend, accountAmounts: { [last4]: amountUsed } }
+// ─── Safe-to-Spend Engine ────────────────────────────────────────────────────
+// spending_bank total minus credit_card total = safe to spend
+// bills_bank and holding are excluded
 
 function computeWaterfall(accounts, latestBalance) {
-  const incomeAccts = accounts
-    .filter(a => a.role === "income")
-    .sort((a, b) => a.incomeRank - b.incomeRank);
-  const spendingAccts = accounts.filter(a => a.role === "spending");
+  const spendingBanks = accounts
+    .filter(a => a.role === "spending_bank")
+    .sort((a, b) => (a.incomeRank ?? 99) - (b.incomeRank ?? 99));
+  const creditCards = accounts.filter(a => a.role === "credit_card");
 
-  const spendingTotal = spendingAccts.reduce((s, a) => s + (latestBalance(a.last4) ?? 0), 0);
+  const bankTotal = spendingBanks.reduce((s, a) => s + (latestBalance(a.last4) ?? 0), 0);
+  const cardTotal = creditCards.reduce((s, a)  => s + (latestBalance(a.last4) ?? 0), 0);
 
-  if (!incomeAccts.length) return { safeToSpend: null, residuals: {} };
+  if (!spendingBanks.length) return { safeToSpend: null, residuals: {} };
 
-  // Distribute obligation across income accounts in order
-  let remaining = spendingTotal;
-  const residuals = {}; // how much of each income account is "free"
-  for (const acct of incomeAccts) {
+  const safeToSpend = bankTotal - cardTotal;
+
+  let remaining = cardTotal;
+  const residuals = {};
+  for (const acct of spendingBanks) {
     const bal = latestBalance(acct.last4) ?? 0;
-    if (remaining <= 0) {
-      residuals[acct.last4] = bal; // fully available
-    } else if (bal >= remaining) {
-      residuals[acct.last4] = bal - remaining;
-      remaining = 0;
-    } else {
-      residuals[acct.last4] = 0;
-      remaining -= bal;
-    }
+    if (remaining <= 0)       { residuals[acct.last4] = bal; }
+    else if (bal >= remaining){ residuals[acct.last4] = bal - remaining; remaining = 0; }
+    else                      { residuals[acct.last4] = 0; remaining -= bal; }
   }
-
-  const safeToSpend = incomeAccts.reduce((s, a) => s + residuals[a.last4], 0) - Math.max(0, remaining);
   return { safeToSpend, residuals };
+}
+
+// Bills bank health
+function computeBillsHealth(accounts, bills, latestBalance) {
+  const billsBanks = accounts.filter(a => a.role === "bills_bank");
+  const totalBillsBal = billsBanks.reduce((s, a) => s + (latestBalance(a.last4) ?? 0), 0);
+  const FREQ = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
+  const monthlyTotal = bills.reduce((s, b) => {
+    const myPct = parseFloat(b.myPct) || 100;
+    return s + (parseFloat(b.amount)||0) * ((FREQ[b.frequency]||12)/12) * (myPct/100);
+  }, 0);
+  return { billsBanks, totalBillsBal, monthlyTotal };
 }
 
 // ─── Threshold Color ──────────────────────────────────────────────────────────
@@ -199,6 +205,19 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
+const S2S_VERSION = "v1.0";
+
+function initStorage() {
+  try {
+    if (localStorage.getItem("s2s_version") !== S2S_VERSION) {
+      // New version — wipe all app data so sample data loads fresh
+      Object.keys(localStorage).filter(k=>k.startsWith("s2s_")).forEach(k=>localStorage.removeItem(k));
+      localStorage.setItem("s2s_version", S2S_VERSION);
+    }
+  } catch {}
+}
+initStorage();
+
 function load(key, fallback) {
   try {
     const raw = localStorage.getItem(key);
@@ -208,14 +227,22 @@ function load(key, fallback) {
 function save(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
 }
+function resetAllData() {
+  try {
+    Object.keys(localStorage).filter(k=>k.startsWith("s2s_")).forEach(k=>localStorage.removeItem(k));
+    window.location.reload();
+  } catch {}
+}
 
 // ─── Defaults (used only on first launch) ────────────────────────────────────
 
-const DEFAULT_ACCOUNTS       = [];
-const DEFAULT_SNAPSHOTS      = [];
+const DEFAULT_ACCOUNTS = [];
+
+const DEFAULT_SNAPSHOTS = [];
 const DEFAULT_THRESHOLDS     = { hi: "60", mid: "30", lo: "15" };
 const DEFAULT_THRESHOLD_MODE = "percent"; // "dollar" | "percent"
-const DEFAULT_DUE_THRESHOLDS = { green: "14", yellow: "7", red: "3" }; // days until due
+const DEFAULT_DUE_THRESHOLDS    = { green: "14", yellow: "7",    red: "3"    }; // days until due
+const DEFAULT_INVEST_THRESHOLDS = { green: "75",  yellow: "40",  red: "10"   }; // % of goal
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -336,10 +363,11 @@ const S = `
   .threshold-save:hover { background:#243E5A; }
 
   /* nav */
-  .nav { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:100%; max-width:430px; background:#0D1929; border-top:1px solid #1A2E4A; display:flex; padding:12px 0 28px; z-index:100; }
-  .nav-btn { flex:1; display:flex; flex-direction:column; align-items:center; gap:5px; background:none; border:none; cursor:pointer; padding:6px 0; }
-  .nav-icon { width:22px; height:22px; }
-  .nav-label { font-family:'DM Sans',sans-serif; font-size:10px; font-weight:500; letter-spacing:1px; text-transform:uppercase; transition:color .15s; }
+  .nav { position:fixed; bottom:0; left:50%; transform:translateX(-50%); width:100%; max-width:430px; background:#0D1929; border-top:1px solid #1A2E4A; display:flex; overflow-x:auto; overflow-y:hidden; padding:10px 0 24px; z-index:100; scrollbar-width:none; -ms-overflow-style:none; }
+  .nav::-webkit-scrollbar { display:none; }
+  .nav-btn { flex:0 0 auto; min-width:60px; display:flex; flex-direction:column; align-items:center; gap:3px; background:none; border:none; cursor:pointer; padding:4px 8px; }
+  .nav-icon { width:18px; height:18px; }
+  .nav-label { font-family:'DM Sans',sans-serif; font-size:9px; font-weight:500; letter-spacing:0.5px; text-transform:uppercase; transition:color .15s; }
   .nav-btn.active .nav-label { color:#00D4AA; }
   .nav-btn        .nav-label { color:#2E4A6A; }
   .nav-btn.active .nav-icon path,
@@ -355,6 +383,161 @@ const S = `
   @keyframes toastOut { from{opacity:1} to{opacity:0} }
 
   .screen-title { font-size:20px; font-weight:600; color:#E8EEF6; padding:52px 24px 24px; font-family:'Space Grotesk',sans-serif; }
+
+  /* ── Dashboard ── */
+  .dash-grid { padding:0 16px; display:flex; flex-direction:column; gap:12px; margin-bottom:24px; }
+  .dash-card { background:#111E33; border:1px solid #1A2E4A; border-radius:16px; padding:18px 20px; }
+  .dash-card-label { font-size:10px; font-weight:600; letter-spacing:2px; text-transform:uppercase; color:#2E4A6A; margin-bottom:8px; }
+  .dash-card-value { font-family:'Space Grotesk',monospace; font-size:36px; font-weight:700; line-height:1; }
+  .dash-card-sub   { font-size:12px; color:#4A6280; margin-top:6px; }
+  .dash-row { display:flex; gap:10px; }
+  .dash-half { flex:1; }
+  .dash-card.small .dash-card-value { font-size:22px; }
+  .upcoming-list { display:flex; flex-direction:column; gap:0; margin-top:4px; }
+  .upcoming-item { display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid #1A2E4A; }
+  .upcoming-item:last-child { border-bottom:none; }
+  .upcoming-name { font-size:13px; color:#C8D8E8; }
+  .upcoming-due  { font-size:11px; color:#4A6280; margin-top:2px; }
+  .upcoming-amt  { font-family:'Space Grotesk',monospace; font-size:14px; font-weight:600; color:#E8EEF6; }
+  .suggest-card { background:#0D1F35; border:1px solid #00D4AA28; border-radius:16px; padding:18px 20px; margin:0 16px 16px; }
+  .suggest-label { font-size:10px; font-weight:600; letter-spacing:2px; text-transform:uppercase; color:#00D4AA; margin-bottom:6px; }
+  .suggest-title { font-size:16px; font-weight:600; color:#E8EEF6; margin-bottom:4px; }
+  .suggest-reason { font-size:12px; color:#4A6280; line-height:1.5; }
+
+  /* ── Bills ── */
+  .bill-list { padding:0 16px; display:flex; flex-direction:column; gap:8px; margin-bottom:80px; }
+  .bill-card { background:#111E33; border:1px solid #1A2E4A; border-radius:14px; padding:16px 18px; }
+  .bill-card-top { display:flex; justify-content:space-between; align-items:flex-start; }
+  .bill-name { font-size:15px; font-weight:600; color:#E8EEF6; }
+  .bill-meta { font-size:12px; color:#4A6280; margin-top:3px; line-height:1.6; }
+  .bill-amount { font-family:'Space Grotesk',monospace; font-size:20px; font-weight:700; color:#E8EEF6; text-align:right; }
+  .bill-amount-sub { font-size:11px; color:#4A6280; text-align:right; margin-top:2px; }
+  .bill-tags { display:flex; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .bill-tag { font-size:10px; font-weight:600; padding:2px 8px; border-radius:10px; }
+  .tag-auto   { background:#00D4AA18; color:#00D4AA; }
+  .tag-fixed  { background:#9B88FF18; color:#9B88FF; }
+  .tag-var    { background:#F5A62318; color:#F5A623; }
+  .tag-ef     { background:#F5C84218; color:#F5C842; }
+  .tag-retire { background:#7B68EE18; color:#9B88FF; }
+  .bill-actions { display:flex; gap:8px; margin-top:12px; padding-top:12px; border-top:1px solid #1A2E4A; }
+  .bill-action-btn { flex:1; padding:8px; border-radius:10px; border:none; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:600; cursor:pointer; }
+  .btn-edit   { background:#1A2E4A; color:#C8D8E8; }
+  .btn-delete { background:#FF6B6B18; color:#FF6B6B; }
+  .fab { position:fixed; bottom:90px; right:20px; width:52px; height:52px; border-radius:26px; background:#00D4AA; border:none; color:#0A1628; font-size:26px; cursor:pointer; display:flex; align-items:center; justify-content:center; box-shadow:0 4px 20px #00D4AA40; z-index:50; }
+  .modal-overlay { position:fixed; inset:0; background:#000000CC; z-index:200; display:flex; align-items:flex-end; }
+  .modal { background:#0D1929; border-radius:20px 20px 0 0; padding:24px 20px 40px; width:100%; max-height:90vh; overflow-y:auto; }
+  .modal-title { font-size:18px; font-weight:600; color:#E8EEF6; font-family:'Space Grotesk',sans-serif; margin-bottom:20px; }
+  .form-label { font-size:11px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; color:#4A6280; margin-bottom:6px; display:block; }
+  .form-group { margin-bottom:16px; }
+  .form-row { display:flex; gap:10px; }
+  .form-row .form-group { flex:1; }
+  .form-input { width:100%; background:#0A1628; border:1px solid #1A2E4A; border-radius:10px; color:#C8D8E8; font-family:'DM Sans',sans-serif; font-size:14px; padding:11px 13px; outline:none; transition:border-color .2s; }
+  .form-input:focus { border-color:#9B88FF; }
+  .form-input::placeholder { color:#2E4A6A; }
+  .form-select { width:100%; background:#0A1628; border:1px solid #1A2E4A; border-radius:10px; color:#C8D8E8; font-family:'DM Sans',sans-serif; font-size:14px; padding:11px 13px; outline:none; appearance:none; cursor:pointer; }
+  .form-toggle-row { display:flex; justify-content:space-between; align-items:center; padding:12px 0; border-bottom:1px solid #1A2E4A; }
+  .form-toggle-label { font-size:14px; color:#C8D8E8; }
+  .toggle { width:42px; height:24px; border-radius:12px; border:none; cursor:pointer; position:relative; transition:background .2s; flex-shrink:0; }
+  .toggle.on  { background:#00D4AA; }
+  .toggle.off { background:#1A2E4A; }
+  .toggle-knob { width:18px; height:18px; border-radius:9px; background:#fff; position:absolute; top:3px; transition:left .2s; }
+  .toggle.on  .toggle-knob { left:21px; }
+  .toggle.off .toggle-knob { left:3px; }
+  .form-save-btn { width:100%; margin-top:20px; background:#00D4AA; color:#0A1628; border:none; border-radius:12px; padding:14px; font-family:'DM Sans',sans-serif; font-size:15px; font-weight:700; cursor:pointer; }
+  .form-cancel-btn { width:100%; margin-top:10px; background:transparent; color:#4A6280; border:none; padding:12px; font-family:'DM Sans',sans-serif; font-size:14px; cursor:pointer; }
+
+  /* ── Paycheck Planner ── */
+  .planner-hero { background:#111E33; border:1px solid #1A2E4A; border-radius:16px; padding:24px 20px; margin:0 16px 16px; }
+  .planner-row { display:flex; justify-content:space-between; align-items:baseline; padding:8px 0; border-bottom:1px solid #1A2E4A; }
+  .planner-row:last-child { border-bottom:none; }
+  .planner-lbl { font-size:13px; color:#4A6280; }
+  .planner-val { font-family:'Space Grotesk',monospace; font-size:26px; font-weight:700; }
+  .planner-section { padding:0 16px; margin-bottom:28px; }
+  .planner-bill-row { background:#111E33; border:1px solid #1A2E4A; border-radius:12px; padding:14px 16px; display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+  .planner-bill-name { font-size:14px; color:#C8D8E8; }
+  .planner-bill-sub  { font-size:11px; color:#4A6280; margin-top:2px; }
+  .planner-bill-amt  { font-family:'Space Grotesk',monospace; font-size:16px; font-weight:600; color:#E8EEF6; }
+
+  /* ── Roadmap ── */
+  .roadmap-container { padding:16px 16px 100px; }
+  .roadmap-step { display:flex; gap:14px; align-items:flex-start; }
+  .step-spine { display:flex; flex-direction:column; align-items:center; width:16px; flex-shrink:0; }
+  .step-dot { width:16px; height:16px; border-radius:8px; flex-shrink:0; border:2px solid transparent; }
+  .step-dot.done    { background:#00D4AA; border-color:#00D4AA; }
+  .step-dot.current { background:#0A1628; border-color:#00D4AA; box-shadow:0 0 0 3px #00D4AA30; }
+  .step-dot.future  { background:#1A2E4A; border-color:#1A2E4A; }
+  .step-line { width:2px; flex:1; min-height:20px; margin:3px 0; }
+  .step-line.done   { background:#00D4AA40; }
+  .step-line.future { background:#1A2E4A; }
+  .step-body { flex:1; padding-bottom:16px; }
+  .step-label { font-size:15px; font-weight:600; margin-bottom:4px; }
+  .step-label.done    { color:#4A6280; }
+  .step-label.current { color:#E8EEF6; }
+  .step-label.future  { color:#2E4A6A; }
+  .step-badge { font-size:10px; font-weight:600; letter-spacing:1px; padding:2px 8px; border-radius:10px; display:inline-block; margin-bottom:6px; }
+  .badge-current { background:#00D4AA20; color:#00D4AA; }
+  .badge-done    { background:#1A2E4A; color:#4A6280; }
+  .roadmap-actions { display:flex; gap:6px; flex-wrap:wrap; }
+  .roadmap-btn { font-size:11px; padding:4px 10px; border-radius:8px; border:none; font-family:'DM Sans',sans-serif; font-weight:600; cursor:pointer; }
+  .rmbtn-done    { background:#00D4AA20; color:#00D4AA; }
+  .rmbtn-current { background:#9B88FF20; color:#9B88FF; }
+  .rmbtn-del     { background:#FF6B6B18; color:#FF6B6B; }
+  .rmbtn-up      { background:#1A2E4A; color:#C8D8E8; }
+  .rmbtn-down    { background:#1A2E4A; color:#C8D8E8; }
+
+  /* ── Investment Goals ── */
+  .invest-list { padding:0 16px; display:flex; flex-direction:column; gap:10px; margin-bottom:80px; }
+  .invest-card { background:#111E33; border:1px solid #1A2E4A; border-radius:14px; padding:18px; }
+  .invest-top  { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; }
+  .invest-name { font-size:15px; font-weight:600; color:#E8EEF6; }
+  .invest-date { font-size:11px; color:#4A6280; margin-top:3px; }
+  .invest-pct  { font-family:'Space Grotesk',monospace; font-size:28px; font-weight:700; color:#00D4AA; }
+  .invest-track { display:flex; justify-content:space-between; margin-bottom:6px; }
+  .invest-track-lbl { font-size:11px; color:#4A6280; }
+  .invest-track-val { font-family:'Space Grotesk',monospace; font-size:13px; color:#C8D8E8; }
+  .progress-bar  { height:6px; border-radius:3px; background:#1A2E4A; overflow:hidden; margin-bottom:12px; }
+  .progress-fill { height:100%; border-radius:3px; background:#00D4AA; transition:width .5s ease; }
+  .invest-actions { display:flex; gap:8px; padding-top:12px; border-top:1px solid #1A2E4A; }
+
+  /* ── Roadmap visual ── */
+  .roadmap-visual { position:relative; padding:20px 16px 40px; overflow:hidden; }
+  .road-svg { width:100%; display:block; }
+  .milestone-popup { position:absolute; background:#111E33; border:1px solid #1A2E4A; border-radius:10px; padding:8px 12px; font-size:12px; color:#C8D8E8; max-width:140px; pointer-events:none; }
+  .milestone-popup.done    { border-color:#00D4AA40; }
+  .milestone-popup.current { border-color:#00D4AA; box-shadow:0 0 12px #00D4AA30; }
+  .milestone-popup.future  { opacity:0.5; }
+  .milestone-date { font-size:10px; color:#4A6280; margin-top:3px; }
+  .roadmap-edit-date { font-size:11px; color:#9B88FF; cursor:pointer; text-decoration:underline; }
+
+  /* ── Bills list view ── */
+  .view-toggle { display:flex; gap:6px; padding:0 16px 16px; }
+  .view-btn { flex:1; padding:8px; border-radius:10px; border:1px solid #1A2E4A; background:#0A1628; color:#4A6280; font-family:'DM Sans',sans-serif; font-size:13px; font-weight:600; cursor:pointer; transition:all .15s; text-align:center; }
+  .view-btn.active { background:#1A2E4A; color:#E8EEF6; border-color:#2E4A6A; }
+  .bills-table { width:100%; border-collapse:collapse; font-size:13px; }
+  .bills-table th { text-align:left; padding:8px 12px; font-size:10px; font-weight:600; letter-spacing:1.5px; text-transform:uppercase; color:#2E4A6A; border-bottom:1px solid #1A2E4A; }
+  .bills-table td { padding:12px; border-bottom:1px solid #111E33; color:#C8D8E8; vertical-align:middle; }
+  .bills-table tr:last-child td { border-bottom:none; }
+  .bills-table tr:hover td { background:#111E3320; }
+  .bills-table-wrap { margin:0 16px 80px; background:#111E33; border:1px solid #1A2E4A; border-radius:14px; overflow:hidden; overflow-x:auto; }
+  .tbl-input { background:transparent; border:none; color:#C8D8E8; font-family:'DM Sans',sans-serif; font-size:13px; width:100%; outline:none; padding:2px 0; }
+  .tbl-input:focus { border-bottom:1px solid #9B88FF; }
+
+  /* ── Float on income accounts ── */
+  .float-row { display:flex; align-items:center; gap:10px; padding:8px 0; }
+  .float-status { display:flex; align-items:center; gap:6px; }
+  .float-bar { height:4px; border-radius:2px; background:#1A2E4A; overflow:hidden; flex:1; min-width:60px; }
+  .float-fill { height:100%; border-radius:2px; transition:width .4s ease; }
+
+  /* ── Investment tab ── */
+  .invest-tab-hero { background:#111E33; border:1px solid #1A2E4A; border-radius:16px; padding:24px 20px; margin:0 16px 16px; }
+  .invest-total-label { font-size:10px; font-weight:600; letter-spacing:2px; text-transform:uppercase; color:#2E4A6A; margin-bottom:8px; }
+  .invest-total-val { font-family:'Space Grotesk',monospace; font-size:52px; font-weight:700; color:#00D4AA; line-height:1; }
+  .invest-total-sub { font-size:12px; color:#4A6280; margin-top:6px; }
+  .holding-list { padding:0 16px; display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+  .holding-card { background:#111E33; border:1px solid #1A2E4A; border-radius:14px; padding:16px 18px; display:flex; justify-content:space-between; align-items:center; }
+  .holding-label { font-size:14px; font-weight:500; color:#C8D8E8; }
+  .holding-last4  { font-size:12px; color:#4A6280; margin-top:2px; }
+  .holding-bal    { font-family:'Space Grotesk',monospace; font-size:18px; font-weight:600; color:#00D4AA; }
 `;
 
 // ─── Rank dot colors ──────────────────────────────────────────────────────────
@@ -363,6 +546,55 @@ const RANK_COLORS = ["#00D4AA", "#9B88FF", "#F5C842", "#F5A623"];
 function rankColor(r) { return RANK_COLORS[r % RANK_COLORS.length]; }
 
 // ─── Icons ────────────────────────────────────────────────────────────────────
+
+const IconDashboard = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+    <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+  </svg>
+);
+const IconBills = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+    <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+  </svg>
+);
+const IconPlanner = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>
+    <path d="M8 14h.01M12 14h.01M8 18h.01M12 18h.01"/>
+  </svg>
+);
+const IconRoadmap = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+    <circle cx="12" cy="9" r="2.5"/>
+  </svg>
+);
+
+const IconAccounts = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="9" cy="7" r="4"/>
+    <path d="M3 21v-2a4 4 0 014-4h4a4 4 0 014 4v2"/>
+    <path d="M16 3.13a4 4 0 010 7.75"/>
+    <path d="M21 21v-2a4 4 0 00-3-3.87"/>
+  </svg>
+);
+
+const IconInvest = () => (
+  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    {/* body */}
+    <path d="M20.5 11c0-4.14-3.58-7.5-8-7.5S4.5 6.86 4.5 11c0 1.64.55 3.16 1.47 4.41L5 18h2l.75 2h3l.5-2h1.5l.5 2h3L17 18h1.5l-.97-2.59A7.44 7.44 0 0020.5 11z"/>
+    {/* coin slot */}
+    <line x1="12.5" y1="5" x2="12.5" y2="7.5"/>
+    {/* eye */}
+    <circle cx="16" cy="10.5" r="0.9" fill="currentColor" stroke="none"/>
+    {/* ear / snout */}
+    <ellipse cx="8" cy="12" rx="1.5" ry="1" strokeWidth="1.4"/>
+    {/* tail */}
+    <path d="M20.5 10.5c1.2-.2 2 .4 2 1.2s-.8 1.3-2 1.1" strokeWidth="1.4"/>
+  </svg>
+);
 
 const IconHome = () => (
   <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -383,23 +615,23 @@ const IconSettings = () => (
 
 // ─── HomeScreen ───────────────────────────────────────────────────────────────
 
-function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
-                      thresholdMode, heroKey, smsText, setSmsText, smsResult,
-                      onParseSMS, onConfirmCard, manualAcct, setManualAcct, manualBal,
-                      setManualBal, onManualSave, latestBalance, firstBalance, dueThresholds }) {
+// ─── SpendingScreen (replaces HomeScreen) ────────────────────────────────────
 
-  const incomeAccts  = accounts.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
-  const spendingAccts = accounts.filter(a => a.role === "spending");
-  const today = new Date().toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric" });
+function SpendingScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
+                          thresholdMode, heroKey, smsText, setSmsText, smsResult,
+                          onParseSMS, onConfirmCard, manualAcct, setManualAcct,
+                          manualBal, setManualBal, onManualSave,
+                          latestBalance, firstBalance, dueThresholds }) {
 
-  // Hero color: based on Primary account's residual vs its starting balance
-  const primaryAcct = incomeAccts[0];
-  const primaryResidual = primaryAcct ? (residuals[primaryAcct.last4] ?? null) : null;
-  const primaryStart = primaryAcct ? firstBalance(primaryAcct.last4) : null;
+  const spendingBanks = accounts.filter(a => a.role === "spending_bank").sort((a,b)=>(a.incomeRank??99)-(b.incomeRank??99));
+  const creditCards   = accounts.filter(a => a.role === "credit_card");
+  const today = new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"});
+
+  const primaryStart = spendingBanks[0] ? firstBalance(spendingBanks[0].last4) : null;
   const heroCol = bandColor(safeToSpend, thresholds, thresholdMode, primaryStart);
 
-  // Waterfall strip: each income account shown proportionally by current balance
-  const totalIncome = incomeAccts.reduce((s,a) => s + (latestBalance(a.last4) ?? 0), 0);
+  const totalBank = spendingBanks.reduce((s,a)=>s+(latestBalance(a.last4)??0),0);
+  const totalCards = creditCards.reduce((s,a)=>s+(latestBalance(a.last4)??0),0);
 
   return (
     <div className="screen">
@@ -408,117 +640,104 @@ function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
         <div className="header-date">{today}</div>
       </div>
 
+      {/* Hero */}
       <div className="hero">
         <div className="hero-eyebrow">Safe to spend</div>
-        <div key={heroKey} className="hero-amount anim" style={{ color: heroCol }}>
+        <div key={heroKey} className="hero-amount anim" style={{color:heroCol}}>
           {fmtShort(safeToSpend)}
         </div>
         <div className="hero-sub">
-          {safeToSpend === null ? "Add income account balances to get started"
-           : safeToSpend >= 0  ? "Available after obligations"
-           : "Obligations exceed available balance"}
+          {safeToSpend === null ? "Add a spending account to get started"
+           : safeToSpend >= 0  ? "Your bills are paid — this is yours to spend"
+           : "Credit card balances exceed your spending accounts"}
         </div>
       </div>
 
-      {/* Waterfall strip */}
-      {incomeAccts.length > 0 && totalIncome > 0 && (
+      {/* Thin waterfall strip */}
+      {spendingBanks.length > 0 && totalBank > 0 && (
         <div className="waterfall-strip">
-          {incomeAccts.map(a => {
+          {spendingBanks.map(a => {
             const bal = latestBalance(a.last4) ?? 0;
             const start = firstBalance(a.last4);
             const res = residuals[a.last4] ?? 0;
             const col = bandColor(res, thresholds, thresholdMode, start);
-            return (
-              <div key={a.last4} className="waterfall-seg"
-                style={{ flex: bal, background: col, opacity: 0.85 }} />
-            );
+            return <div key={a.last4} className="waterfall-seg" style={{flex:bal,background:col,opacity:0.85}}/>;
           })}
         </div>
       )}
 
-      <div className="divider" />
+      <div className="divider"/>
 
-      {/* Income accounts */}
-      {incomeAccts.length > 0 && <>
-        <div className="section-label">Income Accounts</div>
-        <div className="account-list">
-          {incomeAccts.map(a => {
-            const bal = latestBalance(a.last4);
-            const res = residuals[a.last4] ?? null;
-            const start = firstBalance(a.last4);
-            const col = bandColor(res, thresholds, thresholdMode, start);
-            return (
-              <div className={`account-card rank-${a.incomeRank}`} key={a.last4}>
-                <div className="account-card-left">
-                  <div className="acct-rank-dot" style={{ background: rankColor(a.incomeRank) }} />
-                  <div>
-                    <div className="account-label">{a.label}</div>
-                    <div className="account-last4">•••• {a.last4}</div>
-                    <span className="rank-badge" style={{ background: rankColor(a.incomeRank) + "20", color: rankColor(a.incomeRank) }}>
-                      {rankName(a.incomeRank)}
-                    </span>
-                  </div>
-                </div>
-                <div style={{ textAlign: "right" }}>
-                  {bal !== null
-                    ? <div className="account-balance" style={{ color: col }}>{fmt(bal)}</div>
-                    : <div className="account-balance no-data">No balance</div>}
-                  {res !== null && bal !== null && (
-                    <div style={{ fontSize: 11, color: "#4A6280", marginTop: 3 }}>
-                      {fmt(res)} free
+      {/* Spending bank accounts */}
+      {spendingBanks.length > 0 && (
+        <>
+          <div className="section-label">Your Money</div>
+          <div className="account-list">
+            {spendingBanks.map(a => {
+              const bal = latestBalance(a.last4);
+              const res = residuals[a.last4] ?? null;
+              const start = firstBalance(a.last4);
+              const col = bandColor(res, thresholds, thresholdMode, start);
+              return (
+                <div className={`account-card rank-${a.incomeRank}`} key={a.last4}>
+                  <div className="account-card-left">
+                    <div className="acct-rank-dot" style={{background:rankColor(a.incomeRank)}}/>
+                    <div>
+                      <div className="account-label">{a.label}</div>
+                      <div className="account-last4">•••• {a.last4}</div>
                     </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </>}
-
-      {/* Spending accounts */}
-      {spendingAccts.length > 0 && <>
-        <div className="section-label">Spending Accounts</div>
-        <div className="account-list">
-          {spendingAccts.map(a => {
-            const b = latestBalance(a.last4);
-            const days = daysUntilDue(a.dueDay);
-            const dateStr = nextDueDateStr(a.dueDay);
-            const dc = dueColor(days, dueThresholds);
-            return (
-              <div className="account-card" key={a.last4}
-                style={{ borderLeft: dc ? `3px solid ${dc}` : "1px solid #1A2E4A",
-                         paddingLeft: dc ? 15 : 17 }}>
-                <div className="account-card-left">
-                  <div>
-                    <div className="account-label">{a.label}</div>
-                    <div className="account-last4">•••• {a.last4}</div>
-                    {dateStr && (
-                      <span className="rank-badge" style={{
-                        background: dc ? dc + "20" : "#1A2E4A",
-                        color: dc ?? "#4A6280",
-                        marginTop: 4,
-                      }}>
-                        Due {dateStr}
-                        {days !== null && ` · ${days}d`}
-                      </span>
-                    )}
-                    {!dateStr && (
-                      <span className="rank-badge" style={{ background:"#1A2E4A", color:"#2E4A6A" }}>
-                        No due date
-                      </span>
-                    )}
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    {bal !== null
+                      ? <div className="account-balance" style={{color:col}}>{fmt(bal)}</div>
+                      : <div className="account-balance no-data">No balance</div>}
                   </div>
                 </div>
-                {b !== null
-                  ? <div className="account-balance">{fmt(b)}</div>
-                  : <div className="account-balance no-data">No balance</div>}
-              </div>
-            );
-          })}
-        </div>
-      </>}
+              );
+            })}
+          </div>
+        </>
+      )}
 
-      {/* SMS */}
+      {/* Credit cards */}
+      {creditCards.length > 0 && (
+        <>
+          <div className="section-label">Credit Cards</div>
+          <div className="account-list">
+            {creditCards.map(a => {
+              const bal = latestBalance(a.last4);
+              const days = daysUntilDue(a.dueDay);
+              const dateStr = nextDueDateStr(a.dueDay);
+              const dc = dueColor(days, dueThresholds);
+              return (
+                <div className="account-card" key={a.last4}
+                  style={{borderLeft: dc ? `3px solid ${dc}` : "1px solid #1A2E4A", paddingLeft: dc ? 15 : 17}}>
+                  <div className="account-card-left">
+                    <div>
+                      <div className="account-label">{a.label}</div>
+                      <div className="account-last4">•••• {a.last4}</div>
+                      {dateStr
+                        ? <span className="rank-badge" style={{background:dc?dc+"20":"#1A2E4A",color:dc??"#4A6280",marginTop:4}}>
+                            Due {dateStr}{days!==null && ` · ${days}d`}
+                          </span>
+                        : <span className="rank-badge" style={{background:"#1A2E4A",color:"#2E4A6A"}}>No due date</span>}
+                    </div>
+                  </div>
+                  {bal !== null
+                    ? <div className="account-balance">{fmt(bal)}</div>
+                    : <div className="account-balance no-data">No balance</div>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{padding:"0 24px",marginBottom:20,display:"flex",justifyContent:"space-between"}}>
+            <span style={{fontSize:12,color:"#4A6280"}}>Total on cards</span>
+            <span style={{fontFamily:"'Space Grotesk',monospace",fontSize:14,fontWeight:600,color:"#F5A623"}}>{fmt(totalCards)}</span>
+          </div>
+        </>
+      )}
+
+      {/* SMS Paste */}
       <div className="section-label">Paste SMS Alert</div>
       <div className="sms-panel">
         <div className="sms-panel-title">
@@ -529,38 +748,33 @@ function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
         </div>
         <textarea className="sms-textarea"
           placeholder={"Paste a balance alert, e.g.:\nAcct *1234 balance: $4,000.00"}
-          value={smsText} onChange={e => setSmsText(e.target.value)} />
+          value={smsText} onChange={e=>setSmsText(e.target.value)}/>
         <button className="sms-parse-btn" onClick={onParseSMS}>Parse & Save Balance</button>
         {smsResult && smsResult.ok === "confirm" ? (
-          <div className="sms-result" style={{ background:"#9B88FF14", color:"#C8D8E8" }}>
-            <div style={{ marginBottom:10 }}>{smsResult.msg}</div>
-            <select className="select-input" style={{ marginBottom:8 }}
-              defaultValue=""
-              onChange={e => e.target.value && onConfirmCard(e.target.value, smsResult.balance)}>
+          <div className="sms-result" style={{background:"#9B88FF14",color:"#C8D8E8"}}>
+            <div style={{marginBottom:10}}>{smsResult.msg}</div>
+            <select className="select-input" style={{marginBottom:8}} defaultValue=""
+              onChange={e=>e.target.value&&onConfirmCard(e.target.value,smsResult.balance)}>
               <option value="" disabled>Select account…</option>
-              {accounts.map(a => (
-                <option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>
-              ))}
+              {accounts.map(a=><option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>)}
             </select>
           </div>
         ) : smsResult ? (
-          <div className={`sms-result ${smsResult.ok ? "success" : "error"}`}>{smsResult.msg}</div>
+          <div className={`sms-result ${smsResult.ok?"success":"error"}`}>{smsResult.msg}</div>
         ) : null}
       </div>
 
-      {/* Manual */}
+      {/* Manual entry */}
       <div className="section-label">Manual Entry</div>
       <div className="manual-panel">
         <div className="manual-title">Enter Balance Manually</div>
-        <select className="select-input" value={manualAcct} onChange={e => setManualAcct(e.target.value)}>
+        <select className="select-input" value={manualAcct} onChange={e=>setManualAcct(e.target.value)}>
           <option value="">Select account…</option>
-          {accounts.map(a => (
-            <option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>
-          ))}
+          {accounts.map(a=><option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>)}
         </select>
         <div className="input-row">
           <input className="text-input" placeholder="0.00" value={manualBal}
-            onChange={e => setManualBal(e.target.value)} type="number" inputMode="decimal" />
+            onChange={e=>setManualBal(e.target.value)} type="number" inputMode="decimal"/>
           <button className="add-btn" onClick={onManualSave}>Save</button>
         </div>
       </div>
@@ -568,7 +782,6 @@ function HomeScreen({ accounts, snapshots, safeToSpend, residuals, thresholds,
   );
 }
 
-// ─── HistoryScreen ────────────────────────────────────────────────────────────
 
 function HistoryScreen({ snapshots, accounts }) {
   const sorted = [...snapshots].sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -598,14 +811,11 @@ function HistoryScreen({ snapshots, accounts }) {
 
 // ─── SettingsScreen ───────────────────────────────────────────────────────────
 
-function SettingsScreen({ accounts, thresholds, thresholdMode,
-                          onSetRole, onReorder, onRemoveAccount,
-                          onAddAccount, onSaveThresholds, onSaveThresholdMode,
-                          dueThresholds, onSaveDueThresholds, onSetDueDay }) {
-  const [newLabel, setNewLabel] = useState("");
-  const [newLast4, setNewLast4] = useState("");
-  const [newRole,  setNewRole]  = useState("income");
-
+function SettingsScreen({ thresholds, thresholdMode,
+                          dueThresholds, investThresholds,
+                          onSaveThresholds, onSaveThresholdMode,
+                          onSaveDueThresholds, onSaveInvestThresholds,
+                          snapshots, accounts }) {
   const [tHi,  setTHi]  = useState(thresholds.hi);
   const [tMid, setTMid] = useState(thresholds.mid);
   const [tLo,  setTLo]  = useState(thresholds.lo);
@@ -613,21 +823,15 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
   const [dGreen,  setDGreen]  = useState(dueThresholds.green);
   const [dYellow, setDYellow] = useState(dueThresholds.yellow);
   const [dRed,    setDRed]    = useState(dueThresholds.red);
-
-  const incomeAccts  = accounts.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
-  const spendingAccts = accounts.filter(a => a.role === "spending");
-
-  function handleAdd() {
-    const l4 = newLast4.replace(/\D/g,"").slice(-4);
-    if (l4.length !== 4 || !newLabel.trim()) return;
-    onAddAccount(l4, newLabel.trim(), newRole);
-    setNewLabel(""); setNewLast4("");
-  }
+  const [iGreen,  setIGreen]  = useState(investThresholds.green);
+  const [iYellow, setIYellow] = useState(investThresholds.yellow);
+  const [iRed,    setIRed]    = useState(investThresholds.red);
 
   function handleSave() {
     onSaveThresholds({ hi: tHi, mid: tMid, lo: tLo });
     onSaveThresholdMode(tMode);
     onSaveDueThresholds({ green: dGreen, yellow: dYellow, red: dRed });
+    onSaveInvestThresholds({ green: iGreen, yellow: iYellow, red: iRed });
   }
 
   const unit = tMode === "percent" ? "%" : "$";
@@ -697,91 +901,51 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
       </div>
 
       {/* ── Income Accounts (ordered) ── */}
-      <div className="section-label">Income Accounts</div>
-      <div className="settings-section">
-        {incomeAccts.length === 0 && (
-          <div className="settings-row"><div className="settings-row-sub">No income accounts yet.</div></div>
-        )}
-        {incomeAccts.map((a, i) => (
-          <div className="settings-row" key={a.last4}>
-            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-              <div style={{ width:8, height:8, borderRadius:"50%", background:rankColor(a.incomeRank), flexShrink:0 }} />
-              <div>
-                <div className="settings-row-label">{a.label}</div>
-                <div className="settings-row-sub">•••• {a.last4} · {rankName(a.incomeRank)}</div>
-              </div>
-            </div>
-            <div style={{ display:"flex", gap:6, alignItems:"center", flexWrap:"wrap", justifyContent:"flex-end" }}>
-              {i > 0 && (
-                <button className="pill pill-up" onClick={() => onReorder(a.last4, "up")}>↑</button>
-              )}
-              {i < incomeAccts.length - 1 && (
-                <button className="pill pill-down" onClick={() => onReorder(a.last4, "down")}>↓</button>
-              )}
-              <button className="pill pill-purple" onClick={() => onSetRole(a.last4, "spending")}>→ Spending</button>
-              <button className="pill pill-red" onClick={() => onRemoveAccount(a.last4)}>Remove</button>
-            </div>
+      {/* ── Investment Color Thresholds ── */}
+      <div className="section-label">Investment Goal Colors</div>
+      <div className="threshold-panel">
+        <div className="threshold-title">% of Goal</div>
+        <div className="threshold-hint">
+          Colors the investment tab hero number based on overall progress toward your total goal.
+        </div>
+        <div className="band-preview">
+          {["#00D4AA","#F5C842","#F5A623","#FF6B6B"].map(c=><div key={c} className="band-seg" style={{background:c}}/>)}
+        </div>
+        {[
+          {color:"#00D4AA",val:iGreen, set:setIGreen, ph:"e.g. 75"},
+          {color:"#F5C842",val:iYellow,set:setIYellow,ph:"e.g. 40"},
+          {color:"#F5A623",val:iRed,   set:setIRed,   ph:"e.g. 10"},
+        ].map(({color,val,set,ph})=>(
+          <div className="threshold-row" key={color}>
+            <div className="threshold-swatch" style={{background:color}}/>
+            <input className="threshold-input" placeholder={ph} value={val}
+              onChange={e=>set(e.target.value)} type="number" inputMode="decimal"/>
+            <span className="threshold-unit">%</span>
           </div>
         ))}
+        <div style={{fontSize:11,color:"#2E4A6A",marginBottom:12,paddingLeft:22}}>Below the last level shows red.</div>
+        <button className="threshold-save" onClick={handleSave}>Save all</button>
       </div>
 
-      {/* ── Spending Accounts ── */}
-      <div className="section-label">Spending Accounts</div>
-      <div className="settings-section">
-        {spendingAccts.length === 0 && (
-          <div className="settings-row"><div className="settings-row-sub">No spending accounts yet.</div></div>
-        )}
-        {spendingAccts.map(a => (
-          <div className="settings-row" key={a.last4} style={{ flexDirection:"column", alignItems:"stretch", gap:10 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                <div style={{ width:8, height:8, borderRadius:"50%", background:"#F5A623", flexShrink:0 }} />
-                <div>
-                  <div className="settings-row-label">{a.label}</div>
-                  <div className="settings-row-sub">•••• {a.last4}</div>
+      {/* Balance History */}
+      <div className="section-label">Balance History</div>
+      <div className="history-section">
+        {!snapshots || snapshots.length === 0
+          ? <div className="history-empty" style={{padding:"24px 0"}}>No history yet.</div>
+          : [...snapshots].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp)).map(s => {
+              const acct = accounts && accounts.find(ac => ac.last4 === s.accountLast4);
+              return (
+                <div className="history-item" key={s.id}>
+                  <div>
+                    <div className="history-account">{acct ? acct.label : "Acct"} •{s.accountLast4}</div>
+                    <div className="history-time">{fmtTime(s.timestamp)}</div>
+                    <span className={`history-source src-${s.source}`}>{SOURCES[s.source]}</span>
+                  </div>
+                  <div className="history-balance">{fmt(s.balance)}</div>
                 </div>
-              </div>
-              <div style={{ display:"flex", gap:6 }}>
-                <button className="pill pill-teal" onClick={() => onSetRole(a.last4, "income")}>→ Income</button>
-                <button className="pill pill-red"  onClick={() => onRemoveAccount(a.last4)}>Remove</button>
-              </div>
-            </div>
-            <div style={{ display:"flex", alignItems:"center", gap:10, paddingLeft:18 }}>
-              <span style={{ fontSize:12, color:"#4A6280", whiteSpace:"nowrap" }}>Due day</span>
-              <input
-                className="text-input"
-                style={{ maxWidth:80, padding:"7px 10px", fontSize:13 }}
-                placeholder="e.g. 15"
-                type="number"
-                inputMode="numeric"
-                min="1" max="31"
-                defaultValue={a.dueDay ?? ""}
-                key={a.last4 + "_due"}
-                onBlur={e => onSetDueDay(a.last4, e.target.value || null)}
-              />
-              <span style={{ fontSize:12, color:"#2E4A6A" }}>of each month</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* ── Add Account ── */}
-      <div className="section-label">Add Account</div>
-      <div className="add-form">
-        <div className="add-form-title">New Account</div>
-        <div className="role-toggle">
-          <button className={`role-btn ${newRole === "income"  ? "active" : ""}`} onClick={() => setNewRole("income")}>Income</button>
-          <button className={`role-btn ${newRole === "spending"? "active" : ""}`} onClick={() => setNewRole("spending")}>Spending</button>
-        </div>
-        <div className="input-row" style={{ marginBottom:10 }}>
-          <input className="text-input" placeholder="Label (e.g. Chase Checking)"
-            value={newLabel} onChange={e => setNewLabel(e.target.value)} />
-        </div>
-        <div className="input-row">
-          <input className="text-input" placeholder="Last 4 digits" value={newLast4}
-            maxLength={4} onChange={e => setNewLast4(e.target.value)} inputMode="numeric" />
-          <button className="add-btn" onClick={handleAdd}>Add</button>
-        </div>
+              );
+            })
+        }
       </div>
 
       <div className="section-label">About</div>
@@ -789,23 +953,1516 @@ function SettingsScreen({ accounts, thresholds, thresholdMode,
         <div className="settings-row">
           <div>
             <div className="settings-row-label">Safe2Spend</div>
-            <div className="settings-row-sub">v0.4 · Waterfall · $ or % · Due date colors</div>
+            <div className="settings-row-sub">v0.8 · 4 account roles · Bills scale · Swipe nav</div>
           </div>
+        </div>
+        <div className="settings-row" style={{flexDirection:"column",alignItems:"stretch",gap:8}}>
+          <div className="settings-row-label">Reset to Sample Data</div>
+          <div className="settings-row-sub">Clears all saved data and reloads the app with fresh sample accounts, bills, and history.</div>
+          <button onClick={resetAllData}
+            style={{marginTop:4,padding:"10px 16px",borderRadius:10,border:"none",
+              background:"#FF6B6B18",color:"#FF6B6B",fontFamily:"'DM Sans',sans-serif",
+              fontSize:13,fontWeight:600,cursor:"pointer",textAlign:"left"}}>
+            Reset App Data
+          </button>
         </div>
       </div>
     </div>
   );
 }
 
+// ─── Dashboard Character ─────────────────────────────────────────────────────
+// Minimal flat Apple-ish illustration; scene changes with milestone progress
+
+function CharacterScene({ doneCount, totalSteps, currentStep }) {
+  const pct = totalSteps > 0 ? doneCount / totalSteps : 0;
+
+  // Scene 0-2 done: person at a desk, looking at phone (just starting out)
+  // Scene 3-5 done: person in a car, driving (momentum)
+  // Scene 6-9 done: person climbing a mountain (building wealth)
+  // Scene 10+  done: person at summit with flag (thriving)
+
+  const scene = doneCount <= 2 ? "desk" : doneCount <= 5 ? "car" : doneCount <= 9 ? "mountain" : "summit";
+
+  const scenes = {
+    desk: {
+      label: "Getting started",
+      color: "#9B88FF",
+      svg: (
+        <svg viewBox="0 0 220 120" fill="none" xmlns="http://www.w3.org/2000/svg" style={{width:"100%",maxWidth:220}}>
+          {/* desk */}
+          <rect x="30" y="82" width="160" height="8" rx="3" fill="#1A2E4A"/>
+          <rect x="50" y="90" width="6" height="22" rx="2" fill="#1A2E4A"/>
+          <rect x="164" y="90" width="6" height="22" rx="2" fill="#1A2E4A"/>
+          {/* laptop */}
+          <rect x="80" y="62" width="60" height="38" rx="4" fill="#0D1929" stroke="#2E4A6A" strokeWidth="1.5"/>
+          <rect x="84" y="66" width="52" height="29" rx="2" fill="#111E33"/>
+          {/* screen glow lines */}
+          <rect x="88" y="70" width="30" height="2" rx="1" fill="#9B88FF" opacity="0.6"/>
+          <rect x="88" y="75" width="22" height="2" rx="1" fill="#9B88FF" opacity="0.4"/>
+          <rect x="88" y="80" width="26" height="2" rx="1" fill="#00D4AA" opacity="0.5"/>
+          <rect x="68" y="100" width="84" height="4" rx="2" fill="#1A2E4A"/>
+          {/* person */}
+          <circle cx="52" cy="54" r="12" fill="#F5A623"/>
+          <rect x="40" y="68" width="24" height="20" rx="4" fill="#9B88FF"/>
+          {/* arm reaching to laptop */}
+          <path d="M64 74 Q72 74 78 70" stroke="#F5A623" strokeWidth="3.5" strokeLinecap="round"/>
+          {/* coffee */}
+          <rect x="152" y="72" width="14" height="14" rx="3" fill="#1A2E4A" stroke="#2E4A6A" strokeWidth="1"/>
+          <path d="M155 68 Q157 64 159 68" stroke="#4A6280" strokeWidth="1.5" strokeLinecap="round"/>
+        </svg>
+      )
+    },
+    car: {
+      label: "Building momentum",
+      color: "#F5C842",
+      svg: (
+        <svg viewBox="0 0 220 120" fill="none" xmlns="http://www.w3.org/2000/svg" style={{width:"100%",maxWidth:220}}>
+          {/* road */}
+          <rect x="0" y="90" width="220" height="30" fill="#0D1929"/>
+          <rect x="0" y="88" width="220" height="4" fill="#1A2E4A"/>
+          {/* road dashes */}
+          {[10,50,90,130,170].map(x=><rect key={x} x={x} y="103" width="24" height="3" rx="1.5" fill="#2E4A6A"/>)}
+          {/* car body */}
+          <rect x="40" y="68" width="130" height="32" rx="8" fill="#9B88FF"/>
+          {/* car top */}
+          <path d="M70 68 Q80 44 100 42 L140 42 Q158 44 160 68Z" fill="#7B68EE"/>
+          {/* windows */}
+          <rect x="82" y="48" width="30" height="18" rx="3" fill="#C8D8E8" opacity="0.3"/>
+          <rect x="118" y="48" width="30" height="18" rx="3" fill="#C8D8E8" opacity="0.3"/>
+          {/* wheels */}
+          <circle cx="78" cy="100" r="12" fill="#0A1628" stroke="#2E4A6A" strokeWidth="2"/>
+          <circle cx="78" cy="100" r="5" fill="#1A2E4A"/>
+          <circle cx="148" cy="100" r="12" fill="#0A1628" stroke="#2E4A6A" strokeWidth="2"/>
+          <circle cx="148" cy="100" r="5" fill="#1A2E4A"/>
+          {/* headlights */}
+          <ellipse cx="170" cy="80" rx="5" ry="4" fill="#F5C842" opacity="0.8"/>
+          <path d="M175 78 L195 72 M175 82 L195 88" stroke="#F5C842" strokeWidth="1.5" strokeLinecap="round" opacity="0.4"/>
+          {/* person in car */}
+          <circle cx="110" cy="56" r="9" fill="#F5A623"/>
+          {/* speed lines */}
+          {[20,30,40].map((y,i)=>(
+            <line key={i} x1={10} y1={y+50} x2={30} y2={y+50} stroke="#2E4A6A" strokeWidth="1.5" strokeLinecap="round" opacity={0.3+i*0.2}/>
+          ))}
+        </svg>
+      )
+    },
+    mountain: {
+      label: "Climbing higher",
+      color: "#00D4AA",
+      svg: (
+        <svg viewBox="0 0 220 120" fill="none" xmlns="http://www.w3.org/2000/svg" style={{width:"100%",maxWidth:220}}>
+          {/* sky gradient suggestion */}
+          <rect x="0" y="0" width="220" height="120" fill="#0A1628"/>
+          {/* mountain far */}
+          <path d="M0 120 L60 40 L120 120Z" fill="#111E33"/>
+          {/* mountain near */}
+          <path d="M60 120 L140 20 L220 120Z" fill="#0D1929"/>
+          {/* snow cap */}
+          <path d="M130 36 L140 20 L150 36 Q140 32 130 36Z" fill="#C8D8E8" opacity="0.3"/>
+          {/* path up mountain */}
+          <path d="M80 120 Q100 90 115 60 Q125 40 140 20" stroke="#2E4A6A" strokeWidth="2" strokeDasharray="4 4" strokeLinecap="round"/>
+          {/* person climbing */}
+          <circle cx="112" cy="65" r="9" fill="#F5A623"/>
+          <rect x="105" y="75" width="14" height="16" rx="3" fill="#00D4AA"/>
+          {/* arm with axe/pole */}
+          <line x1="119" y1="77" x2="128" y2="65" stroke="#F5A623" strokeWidth="2.5" strokeLinecap="round"/>
+          <line x1="128" y1="65" x2="128" y2="55" stroke="#C8D8E8" strokeWidth="1.5" strokeLinecap="round"/>
+          {/* stars */}
+          {[[185,15],[195,30],[175,25],[200,10]].map(([x,y],i)=>(
+            <circle key={i} cx={x} cy={y} r="1.5" fill="#4A6280" opacity={0.6}/>
+          ))}
+        </svg>
+      )
+    },
+    summit: {
+      label: "At the summit",
+      color: "#00D4AA",
+      svg: (
+        <svg viewBox="0 0 220 120" fill="none" xmlns="http://www.w3.org/2000/svg" style={{width:"100%",maxWidth:220}}>
+          <rect x="0" y="0" width="220" height="120" fill="#0A1628"/>
+          {/* mountains background */}
+          <path d="M0 120 L50 55 L100 120Z" fill="#111E33"/>
+          <path d="M90 120 L150 30 L210 120Z" fill="#0D1929"/>
+          <path d="M140 48 L150 30 L160 48 Q150 44 140 48Z" fill="#C8D8E8" opacity="0.4"/>
+          {/* sunrise rays */}
+          {[0,30,60,90,120,150,180,210,240,270,300,330].map((deg,i)=>(
+            <line key={i}
+              x1={110} y1={30}
+              x2={110 + Math.cos(deg*Math.PI/180)*40}
+              y2={30  + Math.sin(deg*Math.PI/180)*40}
+              stroke="#F5C842" strokeWidth="1" opacity={0.15}/>
+          ))}
+          <circle cx="110" cy="30" r="14" fill="#F5C842" opacity="0.15"/>
+          <circle cx="110" cy="30" r="8"  fill="#F5C842" opacity="0.4"/>
+          {/* person at summit */}
+          <circle cx="150" cy="48" r="9" fill="#F5A623"/>
+          <rect x="143" y="58" width="14" height="16" rx="3" fill="#00D4AA"/>
+          {/* flag */}
+          <line x1="157" y1="55" x2="157" y2="30" stroke="#C8D8E8" strokeWidth="1.5" strokeLinecap="round"/>
+          <path d="M157 30 L172 35 L157 40Z" fill="#00D4AA"/>
+          {/* arms up */}
+          <line x1="143" y1="62" x2="134" y2="52" stroke="#F5A623" strokeWidth="2.5" strokeLinecap="round"/>
+          <line x1="157" y1="62" x2="163" y2="52" stroke="#F5A623" strokeWidth="2.5" strokeLinecap="round"/>
+          {/* sparkles */}
+          {[[130,25],[175,20],[185,45],[120,42]].map(([x,y],i)=>(
+            <g key={i}>
+              <line x1={x} y1={y-4} x2={x} y2={y+4} stroke="#00D4AA" strokeWidth="1.5" strokeLinecap="round" opacity="0.7"/>
+              <line x1={x-4} y1={y} x2={x+4} y2={y} stroke="#00D4AA" strokeWidth="1.5" strokeLinecap="round" opacity="0.7"/>
+            </g>
+          ))}
+        </svg>
+      )
+    }
+  };
+
+  const s = scenes[scene];
+  return (
+    <div style={{
+      background:"#111E33", border:`1px solid ${s.color}20`,
+      borderRadius:16, padding:"20px 20px 16px", margin:"0 16px 16px",
+      textAlign:"center"
+    }}>
+      <div style={{marginBottom:12}}>{s.svg}</div>
+      <div style={{fontSize:11,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:s.color,marginBottom:4}}>
+        {s.label}
+      </div>
+      {currentStep && (
+        <div style={{fontSize:13,color:"#C8D8E8"}}>
+          Working toward: <strong>{currentStep.label}</strong>
+        </div>
+      )}
+      <div style={{fontSize:11,color:"#2E4A6A",marginTop:4}}>
+        {doneCount} of {totalSteps} milestones complete
+      </div>
+    </div>
+  );
+}
+
+// ─── DashboardScreen ──────────────────────────────────────────────────────────
+
+function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
+                           accounts, bills, paycheck, roadmap, snapshots, latestBalance, dueThresholds }) {
+  const incomeAccts  = accounts.filter(a => a.role === "spending_bank").sort((a,b) => a.incomeRank - b.incomeRank);
+  const spendingAccts = accounts.filter(a => a.role === "credit_card");
+
+  // Projected safe to spend from paycheck planner
+  const freq = paycheck.frequency || "biweekly";
+  const FREQ_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
+  const perYear = FREQ_PER_YEAR[freq] || 26;
+  const netPay = parseFloat(paycheck.netPay) || 0;
+  function reservePerPaycheck(bill) {
+    const BILL_FREQ = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
+    const myPct = parseFloat(bill.myPct) || 100;
+    const annual = (parseFloat(bill.amount) || 0) * (BILL_FREQ[bill.frequency] || 12) * (myPct / 100);
+    return annual / perYear;
+  }
+  const totalReserve = bills.reduce((s, b) => s + reservePerPaycheck(b), 0);
+  const projectedSafe = netPay - totalReserve;
+
+  // Current roadmap step
+  const currentStep = roadmap.find(s => s.status === "current");
+  const doneSteps   = roadmap.filter(s => s.status === "done").length;
+  const nextStep    = roadmap.find(s => s.status === "future");
+
+  // Upcoming bills (next 14 days)
+  const today = new Date();
+  const upcoming = spendingAccts
+    .filter(a => a.dueDay)
+    .map(a => {
+      const days = daysUntilDue(a.dueDay);
+      const bal  = latestBalance(a.last4);
+      return { ...a, days, bal };
+    })
+    .filter(a => a.days !== null && a.days <= 14)
+    .sort((a,b) => a.days - b.days);
+
+  // Float status
+  const monthlyBillsByAcct = {};
+  bills.forEach(b => {
+    const BILL_FREQ = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
+    const monthly = (parseFloat(b.amount) || 0) * ((BILL_FREQ[b.frequency] || 12) / 12);
+    const acct = b.paymentAcct;
+    if (acct) monthlyBillsByAcct[acct] = (monthlyBillsByAcct[acct] || 0) + monthly;
+  });
+
+  const primaryAcct = incomeAccts[0];
+  const primaryBal  = primaryAcct ? latestBalance(primaryAcct.last4) : null;
+  const primaryStart = primaryAcct ? firstBalance(primaryAcct.last4) : null;
+  const heroCol = bandColor(safeToSpend, thresholds, thresholdMode, primaryStart);
+  const today2 = new Date().toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric" });
+
+  return (
+    <div className="screen">
+      <div className="header">
+        <div className="header-label">Dashboard</div>
+        <div className="header-date">{today2}</div>
+      </div>
+
+      {/* Projected surplus suggestion */}
+      {projectedSafe > 0 && currentStep && (
+        <div className="suggest-card">
+          <div className="suggest-label">Projected Surplus</div>
+          <div className="suggest-title">{fmtShort(projectedSafe)} extra this paycheck</div>
+          <div className="suggest-reason">
+            Consider putting it toward: <strong style={{color:"#E8EEF6"}}>{currentStep.label}</strong>
+          </div>
+        </div>
+      )}
+
+      {/* Character scene */}
+      <CharacterScene doneCount={doneSteps} totalSteps={roadmap.length} currentStep={currentStep}/>
+
+      <div className="dash-grid">
+
+        {/* Safe to Spend */}
+        <div className="dash-card">
+          <div className="dash-card-label">Safe to Spend</div>
+          <div className="dash-card-value" style={{color: heroCol}}>{fmtShort(safeToSpend)}</div>
+          <div className="dash-card-sub">Based on current balances</div>
+        </div>
+
+        {/* Next paycheck */}
+        <div className="dash-row">
+          <div className="dash-card dash-half small">
+            <div className="dash-card-label">Next Paycheck</div>
+            <div className="dash-card-value">{fmtShort(netPay)}</div>
+            <div className="dash-card-sub">{freq}</div>
+          </div>
+          <div className="dash-card dash-half small">
+            <div className="dash-card-label">Reserved</div>
+            <div className="dash-card-value" style={{color:"#F5A623"}}>{fmtShort(totalReserve)}</div>
+            <div className="dash-card-sub">for bills</div>
+          </div>
+        </div>
+
+        {/* Roadmap */}
+        {currentStep && (
+          <div className="dash-card">
+            <div className="dash-card-label">Current Milestone</div>
+            <div className="dash-card-value" style={{fontSize:20, color:"#00D4AA"}}>{currentStep.label}</div>
+            {nextStep && <div className="dash-card-sub">Next: {nextStep.label}</div>}
+            <div className="dash-card-sub">{doneSteps} of {roadmap.length} complete</div>
+          </div>
+        )}
+
+        {/* Float status */}
+        {accounts.filter(a => a.floatEnabled !== false && a.floatMultiplier).map(a => {
+          const monthly = monthlyBillsByAcct[a.last4] || 0;
+          const targetMult = a.floatMultiplier || 1.5;
+          const target  = monthly * targetMult;
+          const bal     = latestBalance(a.last4) ?? 0;
+          const actualMult = target > 0 ? (bal / monthly) : null;
+          const diff    = bal - target;
+          const col     = diff >= 0 ? "#00D4AA" : bal >= target * 0.75 ? "#F5C842" : "#FF6B6B";
+          return (
+            <div className="dash-card" key={a.last4}>
+              <div className="dash-card-label">Operating Float · {a.label}</div>
+              <div className="dash-card-value" style={{color:col}}>{fmtShort(bal)}</div>
+              <div className="dash-card-sub">
+                Target {fmtShort(target)} ({targetMult}×)
+                {actualMult !== null && ` · Actual ${actualMult.toFixed(1)}×`}
+                {" · "}{diff>=0?"+":""}{fmtShort(diff)}
+              </div>
+            </div>
+          );
+        })}
+
+        {/* Upcoming bills */}
+        {upcoming.length > 0 && (
+          <div className="dash-card">
+            <div className="dash-card-label">Due Soon</div>
+            <div className="upcoming-list">
+              {upcoming.map(a => {
+                const dc = dueColor(a.days, dueThresholds);
+                return (
+                  <div className="upcoming-item" key={a.last4}>
+                    <div>
+                      <div className="upcoming-name">{a.label}</div>
+                      <div className="upcoming-due" style={{color: dc}}>
+                        {nextDueDateStr(a.dueDay)} · {a.days}d
+                      </div>
+                    </div>
+                    <div className="upcoming-amt">
+                      {a.bal !== null ? fmt(a.bal) : "—"}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── BillsScreen ──────────────────────────────────────────────────────────────
+
+// ─── BillsScaleView ──────────────────────────────────────────────────────────
+
+function BillsScaleView({ accounts, bills, latestBalance, dueThresholds }) {
+  const { billsBanks, totalBillsBal, monthlyTotal } = computeBillsHealth(accounts, bills, latestBalance);
+
+  // Safe zone = >= 1.5x monthly, Warning = 1x-1.5x, Danger = below 1x
+  const safeMin    = monthlyTotal * 1.5;
+  const warnMin    = monthlyTotal * 1.0;
+  const maxScale   = Math.max(safeMin * 1.4, totalBillsBal * 1.1, 1);
+
+  const pct = maxScale > 0 ? Math.min(100, (totalBillsBal / maxScale) * 100) : 0;
+  const safeMinPct = (safeMin / maxScale) * 100;
+  const warnMinPct = (warnMin / maxScale) * 100;
+
+  const zoneColor = totalBillsBal >= safeMin ? "#00D4AA"
+                  : totalBillsBal >= warnMin ? "#F5C842"
+                  : "#FF6B6B";
+  const zoneLabel = totalBillsBal >= safeMin ? "Safe"
+                  : totalBillsBal >= warnMin ? "Watch it"
+                  : "Danger";
+
+  // Build monthly bill timeline — which bills hit when this month
+  const today = new Date();
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth()+1, 0).getDate();
+
+  // Map credit card accounts to due days and match bill costs
+  const creditCards = accounts.filter(a => a.role === "credit_card" && a.dueDay);
+  const billsByDueDay = {};
+  bills.forEach(b => {
+    if (!b.paymentAcct) return;
+    const acct = accounts.find(a => a.last4 === b.paymentAcct && a.role === "credit_card");
+    if (!acct || !acct.dueDay) return;
+    const day = acct.dueDay;
+    const FREQ = {weekly:52,biweekly:26,semimonthly:24,monthly:12,quarterly:4,annual:1,onetime:0};
+    const monthly = (parseFloat(b.amount)||0) * ((FREQ[b.frequency]||12)/12) * ((parseFloat(b.myPct)||100)/100);
+    if (!billsByDueDay[day]) billsByDueDay[day] = { day, total:0, items:[] };
+    billsByDueDay[day].total += monthly;
+    billsByDueDay[day].items.push({ name:b.name, amount:monthly });
+  });
+
+  // Also add direct bills (no credit card, payment from bills_bank)
+  bills.forEach(b => {
+    if (!b.paymentAcct) return;
+    const acct = accounts.find(a => a.last4 === b.paymentAcct && a.role === "bills_bank");
+    if (!acct) return;
+    const day = b.dueDay || 1;
+    const FREQ = {weekly:52,biweekly:26,semimonthly:24,monthly:12,quarterly:4,annual:1,onetime:0};
+    const monthly = (parseFloat(b.amount)||0) * ((FREQ[b.frequency]||12)/12) * ((parseFloat(b.myPct)||100)/100);
+    if (!billsByDueDay[day]) billsByDueDay[day] = { day, total:0, items:[] };
+    billsByDueDay[day].total += monthly;
+    billsByDueDay[day].items.push({ name:b.name, amount:monthly });
+  });
+
+  const timeline = Object.values(billsByDueDay).sort((a,b)=>a.day-b.day);
+
+  // Running balance simulation
+  let running = totalBillsBal;
+  const timelineWithBalance = timeline.map(t => {
+    running -= t.total;
+    return { ...t, runningAfter: running };
+  });
+
+  if (billsBanks.length === 0) return (
+    <div className="history-empty">No bills account set up.<br/>Add an account with the Bills role in Accounts.</div>
+  );
+
+  return (
+    <div style={{padding:"0 16px 20px"}}>
+
+      {/* Scale */}
+      <div style={{marginBottom:24}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:8}}>
+          <span style={{fontSize:11,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"#2E4A6A"}}>Bills Account Balance</span>
+          <span style={{fontFamily:"'Space Grotesk',monospace",fontSize:22,fontWeight:700,color:zoneColor}}>{fmt(totalBillsBal)}</span>
+        </div>
+
+        {/* Colored track */}
+        <div style={{position:"relative",height:28,borderRadius:14,overflow:"hidden",background:"#111E33",marginBottom:8}}>
+          {/* Zone backgrounds */}
+          <div style={{position:"absolute",left:0,top:0,bottom:0,width:`${warnMinPct}%`,background:"#FF6B6B20"}}/>
+          <div style={{position:"absolute",left:`${warnMinPct}%`,top:0,bottom:0,width:`${safeMinPct-warnMinPct}%`,background:"#F5C84218"}}/>
+          <div style={{position:"absolute",left:`${safeMinPct}%`,top:0,bottom:0,right:0,background:"#00D4AA12"}}/>
+          {/* Zone lines */}
+          <div style={{position:"absolute",left:`${warnMinPct}%`,top:0,bottom:0,width:2,background:"#F5C842",opacity:0.5}}/>
+          <div style={{position:"absolute",left:`${safeMinPct}%`,top:0,bottom:0,width:2,background:"#00D4AA",opacity:0.5}}/>
+          {/* Fill bar */}
+          <div style={{position:"absolute",left:0,top:4,bottom:4,width:`${pct}%`,background:zoneColor,borderRadius:10,transition:"width .5s ease"}}/>
+        </div>
+
+        {/* Zone labels */}
+        <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+          <span style={{fontSize:10,color:"#FF6B6B"}}>Danger</span>
+          <span style={{fontSize:10,color:"#F5C842"}}>Warning</span>
+          <span style={{fontSize:10,color:"#00D4AA"}}>Safe</span>
+        </div>
+        <div style={{display:"flex",justifyContent:"space-between"}}>
+          <span style={{fontSize:10,color:"#4A6280"}}>Below {fmt(warnMin)}</span>
+          <span style={{fontSize:10,color:"#4A6280"}}>{fmt(warnMin)}–{fmt(safeMin)}</span>
+          <span style={{fontSize:10,color:"#4A6280"}}>Above {fmt(safeMin)}</span>
+        </div>
+
+        {/* Status */}
+        <div style={{marginTop:12,padding:"10px 14px",background:zoneColor+"12",border:`1px solid ${zoneColor}30`,borderRadius:10,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:13,fontWeight:600,color:zoneColor}}>{zoneLabel}</div>
+            <div style={{fontSize:11,color:"#4A6280",marginTop:2}}>Monthly obligations: {fmt(monthlyTotal)}</div>
+          </div>
+          <div style={{textAlign:"right"}}>
+            <div style={{fontSize:11,color:"#4A6280"}}>Buffer</div>
+            <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:14,fontWeight:600,color:zoneColor}}>
+              {monthlyTotal > 0 ? `${(totalBillsBal/monthlyTotal).toFixed(1)}×` : "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Bills accounts breakdown */}
+      {billsBanks.map(a => (
+        <div key={a.last4} style={{background:"#111E33",border:"1px solid #1A2E4A",borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:13,fontWeight:500,color:"#C8D8E8"}}>{a.label}</div>
+            <div style={{fontSize:11,color:"#4A6280"}}>•••• {a.last4}</div>
+          </div>
+          <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:600,color:"#9B88FF"}}>
+            {latestBalance(a.last4) !== null ? fmt(latestBalance(a.last4)) : "—"}
+          </div>
+        </div>
+      ))}
+
+      {/* Monthly timeline */}
+      {timelineWithBalance.length > 0 && (
+        <>
+          <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"#2E4A6A",margin:"20px 0 10px"}}>
+            Estimated Monthly Flow
+          </div>
+          {timelineWithBalance.map((t,i)=>{
+            const col = t.runningAfter >= safeMin ? "#00D4AA" : t.runningAfter >= warnMin ? "#F5C842" : "#FF6B6B";
+            return (
+              <div key={i} style={{background:"#111E33",border:"1px solid #1A2E4A",borderRadius:12,padding:"12px 14px",marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                  <div style={{fontSize:13,fontWeight:600,color:"#E8EEF6"}}>Day {t.day}</div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:11,color:"#F5A623"}}>−{fmt(t.total)}</div>
+                    <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:14,fontWeight:600,color:col}}>{fmt(t.runningAfter)}</div>
+                  </div>
+                </div>
+                {t.items.map((item,j)=>(
+                  <div key={j} style={{display:"flex",justifyContent:"space-between",paddingTop:4,borderTop:j===0?"1px solid #1A2E4A":"none",marginTop:j===0?4:0}}>
+                    <span style={{fontSize:12,color:"#4A6280"}}>{item.name}</span>
+                    <span style={{fontSize:12,color:"#4A6280"}}>{fmt(item.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {timelineWithBalance.length === 0 && monthlyTotal > 0 && (
+        <div style={{fontSize:13,color:"#2E4A6A",textAlign:"center",padding:"16px 0"}}>
+          Set due days on your credit cards in Accounts to see the monthly timeline.
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+const FREQ_LABELS = { weekly:"Weekly", biweekly:"Biweekly", semimonthly:"Semi-monthly",
+                      monthly:"Monthly", quarterly:"Quarterly", annual:"Annual", onetime:"One-time" };
+const FREQ_PER_YEAR_MAP = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
+
+function monthlyEquiv(bill) {
+  const annual = (parseFloat(bill.amount) || 0) * (FREQ_PER_YEAR_MAP[bill.frequency] || 12);
+  return annual / 12;
+}
+
+const EMPTY_BILL = {
+  name:"", amount:"", frequency:"monthly", myPct:"100", theirPct:"0",
+  fundingAcct:"", paymentAcct:"", creditCard:"", rewardMult:"",
+  isEF:false, isRetire:false, isFixed:true, isAutopay:false, notes:"", dueDay:null
+};
+
+function BillForm({ bill, accounts, onSave, onCancel }) {
+  const [b, setB] = useState(bill);
+  function set(k, v) { setB(prev => ({...prev, [k]: v})); }
+  const Toggle = ({k}) => (
+    <button className={`toggle ${b[k] ? "on" : "off"}`} onClick={() => set(k, !b[k])}>
+      <div className="toggle-knob"/>
+    </button>
+  );
+  const allAccts = accounts;
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onCancel()}>
+      <div className="modal">
+        <div className="modal-title">{bill.id ? "Edit Bill" : "Add Bill"}</div>
+
+        <div className="form-group">
+          <label className="form-label">Bill Name</label>
+          <input className="form-input" placeholder="e.g. Netflix" value={b.name} onChange={e=>set("name",e.target.value)}/>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Amount</label>
+            <input className="form-input" placeholder="0.00" type="number" inputMode="decimal" value={b.amount} onChange={e=>set("amount",e.target.value)}/>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Frequency</label>
+            <select className="form-select" value={b.frequency} onChange={e=>set("frequency",e.target.value)}>
+              {Object.entries(FREQ_LABELS).map(([k,v])=><option key={k} value={k}>{v}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">My %</label>
+            <input className="form-input" placeholder="100" type="number" inputMode="numeric" value={b.myPct} onChange={e=>set("myPct",e.target.value)}/>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Their %</label>
+            <input className="form-input" placeholder="0" type="number" inputMode="numeric" value={b.theirPct} onChange={e=>set("theirPct",e.target.value)}/>
+          </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Funding Account (deposit lands here)</label>
+          <select className="form-select" value={b.fundingAcct} onChange={e=>set("fundingAcct",e.target.value)}>
+            <option value="">None</option>
+            {allAccts.map(a=><option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>)}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Payment Account (pays the bill)</label>
+          <select className="form-select" value={b.paymentAcct} onChange={e=>set("paymentAcct",e.target.value)}>
+            <option value="">None</option>
+            {allAccts.map(a=><option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>)}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Credit Card Used (optional)</label>
+          <select className="form-select" value={b.creditCard} onChange={e=>set("creditCard",e.target.value)}>
+            <option value="">None</option>
+            {accounts.filter(a=>a.role==="credit_card").map(a=><option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>)}
+          </select>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Reward Multiplier</label>
+          <input className="form-input" placeholder="e.g. 3x travel" value={b.rewardMult} onChange={e=>set("rewardMult",e.target.value)}/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Notes</label>
+          <input className="form-input" placeholder="Optional notes" value={b.notes} onChange={e=>set("notes",e.target.value)}/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Due Day of Month</label>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <input className="form-input" style={{maxWidth:100}} placeholder="e.g. 15"
+              type="number" inputMode="numeric" min="1" max="31"
+              value={b.dueDay??""} onChange={e=>set("dueDay", e.target.value ? parseInt(e.target.value) : null)}/>
+            <span style={{fontSize:13,color:"#4A6280"}}>of each month</span>
+          </div>
+        </div>
+        <div className="form-toggle-row"><span className="form-toggle-label">Fixed (not variable)</span><Toggle k="isFixed"/></div>
+        <div className="form-toggle-row"><span className="form-toggle-label">Autopay</span><Toggle k="isAutopay"/></div>
+        <div className="form-toggle-row"><span className="form-toggle-label">Emergency Fund Expense</span><Toggle k="isEF"/></div>
+        <div className="form-toggle-row"><span className="form-toggle-label">Retirement Expense</span><Toggle k="isRetire"/></div>
+
+        <button className="form-save-btn" onClick={()=>onSave(b)}>Save Bill</button>
+        <button className="form-cancel-btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, latestBalance, dueThresholds, paycheck, onSavePaycheck }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingBill, setEditingBill] = useState(null);
+
+  function handleSave(b) {
+    if (b.id) onEditBill(b); else onAddBill(b);
+    setShowForm(false); setEditingBill(null);
+  }
+
+  const totalMonthly = bills.reduce((s,b) => s + monthlyEquiv(b) * ((parseFloat(b.myPct)||100)/100), 0);
+
+  const [viewMode, setViewMode] = useState("scale");
+
+  return (
+    <div className="screen">
+      <div className="header">
+        <div className="header-label">Bills</div>
+        <div style={{fontFamily:"'Space Grotesk',sans-serif", fontSize:16, fontWeight:700, color:"#E8EEF6"}}>
+          {fmt(totalMonthly)}<span style={{fontSize:11,color:"#4A6280",fontWeight:400}}>/mo</span>
+        </div>
+      </div>
+
+      <div className="view-toggle">
+        <button className={`view-btn ${viewMode==="scale"?"active":""}`} onClick={()=>setViewMode("scale")}>◉ Scale</button>
+        <button className={`view-btn ${viewMode==="planner"?"active":""}`} onClick={()=>setViewMode("planner")}>⊟ Planner</button>
+        <button className={`view-btn ${viewMode==="tile"?"active":""}`} onClick={()=>setViewMode("tile")}>⊞ Tiles</button>
+        <button className={`view-btn ${viewMode==="list"?"active":""}`} onClick={()=>setViewMode("list")}>≡ List</button>
+      </div>
+
+      {bills.length === 0 && (
+        <div className="history-empty">No bills yet.<br/>Tap + to add your first bill.</div>
+      )}
+
+      {viewMode === "scale" && (
+        <BillsScaleView accounts={accounts} bills={bills} latestBalance={latestBalance} dueThresholds={dueThresholds}/>
+      )}
+      {viewMode === "planner" && (
+        <PlannerScreen bills={bills} paycheck={paycheck} onSavePaycheck={onSavePaycheck} embedded={true}/>
+      )}
+      {viewMode === "tile" && (
+        <div className="bill-list">
+          {bills.map(bill => {
+            const monthly = monthlyEquiv(bill) * ((parseFloat(bill.myPct)||100)/100);
+            return (
+              <div className="bill-card" key={bill.id}>
+                <div className="bill-card-top">
+                  <div>
+                    <div className="bill-name">{bill.name}</div>
+                    <div className="bill-meta">
+                      {FREQ_LABELS[bill.frequency]} · {bill.myPct}% my share
+                      {bill.fundingAcct && ` · Fund: •${bill.fundingAcct}`}
+                      {bill.paymentAcct && ` → Pay: •${bill.paymentAcct}`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="bill-amount">{fmt(parseFloat(bill.amount)||0)}</div>
+                    <div className="bill-amount-sub">{fmt(monthly)}/mo</div>
+                  </div>
+                </div>
+                <div className="bill-tags">
+                  {bill.isAutopay && <span className="bill-tag tag-auto">Autopay</span>}
+                  {bill.isFixed   && <span className="bill-tag tag-fixed">Fixed</span>}
+                  {!bill.isFixed  && <span className="bill-tag tag-var">Variable</span>}
+                  {bill.isEF      && <span className="bill-tag tag-ef">Emergency Fund</span>}
+                  {bill.isRetire  && <span className="bill-tag tag-retire">Retirement</span>}
+                  {bill.rewardMult && <span className="bill-tag" style={{background:"#F5C84218",color:"#F5C842"}}>{bill.rewardMult}</span>}
+                </div>
+                <div className="bill-actions">
+                  <button className="bill-action-btn btn-edit" onClick={()=>{setEditingBill(bill);setShowForm(true);}}>Edit</button>
+                  <button className="bill-action-btn btn-delete" onClick={()=>onDeleteBill(bill.id)}>Remove</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {viewMode === "list" && (
+        <div className="bills-table-wrap">
+          <table className="bills-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Amount</th>
+                <th>Freq</th>
+                <th>My %</th>
+                <th>/mo</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {bills.map(bill => {
+                const monthly = monthlyEquiv(bill) * ((parseFloat(bill.myPct)||100)/100);
+                return (
+                  <tr key={bill.id}>
+                    <td>
+                      <input className="tbl-input" defaultValue={bill.name}
+                        onBlur={e=>onEditBill({...bill,name:e.target.value})}/>
+                    </td>
+                    <td>
+                      <input className="tbl-input" style={{width:70}} defaultValue={bill.amount} type="number"
+                        onBlur={e=>onEditBill({...bill,amount:e.target.value})}/>
+                    </td>
+                    <td>
+                      <select style={{background:"transparent",border:"none",color:"#C8D8E8",fontSize:12,fontFamily:"'DM Sans',sans-serif",cursor:"pointer"}}
+                        value={bill.frequency} onChange={e=>onEditBill({...bill,frequency:e.target.value})}>
+                        {Object.entries(FREQ_LABELS).map(([k,v])=><option key={k} value={k}>{v.split(" ")[0]}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <input className="tbl-input" style={{width:44}} defaultValue={bill.myPct} type="number"
+                        onBlur={e=>onEditBill({...bill,myPct:e.target.value})}/>
+                    </td>
+                    <td style={{color:"#4A6280",fontFamily:"'Space Grotesk',monospace",fontSize:13}}>{fmt(monthly)}</td>
+                    <td>
+                      <button style={{background:"none",border:"none",color:"#FF6B6B",cursor:"pointer",fontSize:14}}
+                        onClick={()=>onDeleteBill(bill.id)}>✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <button className="fab" onClick={()=>{setEditingBill(null);setShowForm(true);}}>+</button>
+
+      {showForm && (
+        <BillForm
+          bill={editingBill || EMPTY_BILL}
+          accounts={accounts}
+          onSave={handleSave}
+          onCancel={()=>{setShowForm(false);setEditingBill(null);}}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── PlannerScreen ────────────────────────────────────────────────────────────
+
+const FREQ_OPTIONS = [
+  {v:"weekly",       l:"Weekly"},
+  {v:"biweekly",     l:"Biweekly (every 2 weeks)"},
+  {v:"semimonthly",  l:"Semi-monthly (twice/month)"},
+  {v:"monthly",      l:"Monthly"},
+];
+
+function PlannerScreen({ bills, paycheck, onSavePaycheck, embedded=false }) {
+  const [netPay, setNetPay]     = useState(paycheck.netPay || "");
+  const [freq,   setFreq]       = useState(paycheck.frequency || "biweekly");
+
+  const FREQ_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
+  const perYear = FREQ_PER_YEAR[freq] || 26;
+  const net = parseFloat(netPay) || 0;
+
+  function reservePerPaycheck(bill) {
+    const myPct  = parseFloat(bill.myPct) || 100;
+    const annual = (parseFloat(bill.amount) || 0) * (FREQ_PER_YEAR_MAP[bill.frequency] || 12) * (myPct / 100);
+    return annual / perYear;
+  }
+
+  const lineItems = bills.map(b => ({ ...b, reserve: reservePerPaycheck(b) }))
+                         .filter(b => b.reserve > 0)
+                         .sort((a,b) => b.reserve - a.reserve);
+  const totalReserve = lineItems.reduce((s,b) => s + b.reserve, 0);
+  const remaining    = net - totalReserve;
+
+  function handleSave() { onSavePaycheck({ netPay, frequency: freq }); }
+
+  return (
+    <div className={embedded?"":"screen"}>
+      {!embedded && <div className="screen-title">Paycheck Planner</div>}
+
+      <div style={{padding:"0 16px", marginBottom:16}}>
+        <div className="form-group">
+          <label className="form-label">Net Pay (take-home)</label>
+          <input className="form-input" placeholder="0.00" type="number" inputMode="decimal"
+            value={netPay} onChange={e=>setNetPay(e.target.value)} onBlur={handleSave}/>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Pay Frequency</label>
+          <select className="form-select" value={freq} onChange={e=>{setFreq(e.target.value); setTimeout(handleSave,50);}}>
+            {FREQ_OPTIONS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {net > 0 && (
+        <>
+          <div className="planner-hero">
+            <div className="planner-row">
+              <span className="planner-lbl">Paycheck</span>
+              <span className="planner-val">{fmt(net)}</span>
+            </div>
+            <div className="planner-row">
+              <span className="planner-lbl">Reserved for bills</span>
+              <span className="planner-val" style={{color:"#F5A623"}}>−{fmt(totalReserve)}</span>
+            </div>
+            <div className="planner-row">
+              <span className="planner-lbl">Projected Safe to Spend</span>
+              <span className="planner-val" style={{color: remaining>=0?"#00D4AA":"#FF6B6B"}}>{fmt(remaining)}</span>
+            </div>
+          </div>
+
+          <div className="section-label" style={{marginTop:8}}>Reserve Breakdown</div>
+          <div className="planner-section">
+            {lineItems.map(b => (
+              <div className="planner-bill-row" key={b.id}>
+                <div>
+                  <div className="planner-bill-name">{b.name}</div>
+                  <div className="planner-bill-sub">{FREQ_LABELS[b.frequency]} · {b.myPct}% my share</div>
+                </div>
+                <div className="planner-bill-amt">{fmt(b.reserve)}</div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {net === 0 && (
+        <div className="history-empty">Enter your take-home pay above<br/>to see your reserve plan.</div>
+      )}
+    </div>
+  );
+}
+
+// ─── RoadmapScreen ────────────────────────────────────────────────────────────
+
+const DEFAULT_ROADMAP = [
+  { id:1,  label:"Starter Emergency Fund",          status:"current", completedAt:undefined },
+  { id:2,  label:"Planned Expense Reserve",         status:"future",  completedAt:undefined },
+  { id:3,  label:"Separate Planned Expense Account",status:"future",  completedAt:undefined },
+  { id:4,  label:"Pay Off Debt",                    status:"future",  completedAt:undefined },
+  { id:5,  label:"High Yield Savings",              status:"future",  completedAt:undefined },
+  { id:6,  label:"Three Month Emergency Fund",      status:"future",  completedAt:undefined },
+  { id:7,  label:"Variable Expense Reserve",        status:"future",  completedAt:undefined },
+  { id:8,  label:"Company Match",                   status:"future",  completedAt:undefined },
+  { id:9,  label:"Max HSA",                         status:"future",  completedAt:undefined },
+  { id:10, label:"Open Roth IRA",                   status:"future",  completedAt:undefined },
+  { id:11, label:"Open Traditional IRA",            status:"future",  completedAt:undefined },
+  { id:12, label:"Open Brokerage",                  status:"future",  completedAt:undefined },
+  { id:13, label:"Max Roth IRA",                    status:"future",  completedAt:undefined },
+  { id:14, label:"Investment Milestone",            status:"future",  completedAt:undefined },
+  { id:15, label:"Max 401(k)",                      status:"future",  completedAt:undefined },
+  { id:16, label:"Mega Backdoor Roth",              status:"future",  completedAt:undefined },
+];
+
+// ─── Compact Roadmap (kata current/target condition style) ────────────────────
+
+function KataRoadmap({ roadmap, onUpdateRoadmap }) {
+  const [showAdd,    setShowAdd]    = useState(false);
+  const [newLabel,   setNewLabel]   = useState("");
+  const [editId,     setEditId]     = useState(null);
+  const [editVal,    setEditVal]    = useState("");
+  const [editDateId, setEditDateId] = useState(null);
+  const [editDateVal,setEditDateVal]= useState("");
+
+  const doneSteps    = roadmap.filter(s=>s.status==="done");
+  const currentStep  = roadmap.find(s=>s.status==="current");
+  const futureSteps  = roadmap.filter(s=>s.status==="future");
+  const nextStep     = futureSteps[0];
+  const doneCount    = doneSteps.length;
+  const total        = roadmap.length;
+
+  function markDone(id) {
+    const d = new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"});
+    onUpdateRoadmap(roadmap.map(s=>s.id===id?{...s,status:"done",completedAt:s.completedAt||d}:s));
+  }
+  function setStatus(id,status) {
+    onUpdateRoadmap(roadmap.map(s=>s.id===id?{...s,status,completedAt:status==="done"?(s.completedAt||new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})):undefined}:s));
+  }
+  function moveStep(id,dir) {
+    const steps=[...roadmap];
+    const idx=steps.findIndex(s=>s.id===id);
+    const swap=dir==="up"?idx-1:idx+1;
+    if(swap<0||swap>=steps.length)return;
+    [steps[idx],steps[swap]]=[steps[swap],steps[idx]];
+    onUpdateRoadmap(steps);
+  }
+  function deleteStep(id){onUpdateRoadmap(roadmap.filter(s=>s.id!==id));}
+  function addStep(){
+    if(!newLabel.trim())return;
+    onUpdateRoadmap([...roadmap,{id:Date.now(),label:newLabel.trim(),status:"future"}]);
+    setNewLabel("");setShowAdd(false);
+  }
+  function saveEdit(id){onUpdateRoadmap(roadmap.map(s=>s.id===id?{...s,label:editVal}:s));setEditId(null);}
+  function saveDate(id){onUpdateRoadmap(roadmap.map(s=>s.id===id?{...s,completedAt:editDateVal}:s));setEditDateId(null);}
+
+  const pct = total > 0 ? Math.round((doneCount/total)*100) : 0;
+
+  return (
+    <div className="screen">
+      <div className="header">
+        <div className="header-label">Roadmap</div>
+        <div style={{fontSize:13,color:"#4A6280"}}>{doneCount}/{total} done</div>
+      </div>
+
+      {/* ── Kata board: current condition → challenge → target condition ── */}
+      <div style={{padding:"0 16px 16px"}}>
+
+        {/* Progress bar */}
+        <div style={{marginBottom:16}}>
+          <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+            <span style={{fontSize:11,color:"#4A6280",letterSpacing:"1px",textTransform:"uppercase"}}>Overall Progress</span>
+            <span style={{fontSize:13,fontFamily:"'Space Grotesk',monospace",color:"#00D4AA",fontWeight:700}}>{pct}%</span>
+          </div>
+          <div className="progress-bar" style={{height:8}}>
+            <div className="progress-fill" style={{width:`${pct}%`}}/>
+          </div>
+        </div>
+
+        {/* Three-panel kata board */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:8,marginBottom:20}}>
+
+          {/* Current Condition */}
+          <div style={{background:"#111E33",border:"1px solid #1A2E4A",borderRadius:14,padding:14}}>
+            <div style={{fontSize:9,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:"#2E4A6A",marginBottom:8}}>Current</div>
+            {currentStep ? (
+              <>
+                <div style={{fontSize:14,fontWeight:600,color:"#E8EEF6",lineHeight:1.3,marginBottom:6}}>{currentStep.label}</div>
+                <span className="step-badge badge-current" style={{fontSize:9}}>In progress</span>
+              </>
+            ) : (
+              <div style={{fontSize:13,color:"#2E4A6A"}}>Not set</div>
+            )}
+          </div>
+
+          {/* Arrow + challenge */}
+          <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:4}}>
+            <div style={{fontSize:20,color:"#2E4A6A"}}>→</div>
+            <div style={{fontSize:9,color:"#2E4A6A",textAlign:"center",letterSpacing:"1px",textTransform:"uppercase"}}>Next</div>
+          </div>
+
+          {/* Target Condition */}
+          <div style={{background:"#0D1F35",border:"1px solid #00D4AA30",borderRadius:14,padding:14}}>
+            <div style={{fontSize:9,fontWeight:700,letterSpacing:"2px",textTransform:"uppercase",color:"#00D4AA60",marginBottom:8}}>Target</div>
+            {nextStep ? (
+              <>
+                <div style={{fontSize:14,fontWeight:600,color:"#C8D8E8",lineHeight:1.3,marginBottom:6}}>{nextStep.label}</div>
+                <span style={{fontSize:9,fontWeight:600,letterSpacing:"1px",background:"#00D4AA15",color:"#00D4AA60",padding:"2px 6px",borderRadius:8}}>Upcoming</span>
+              </>
+            ) : doneCount === total && total > 0 ? (
+              <div style={{fontSize:13,color:"#00D4AA",fontWeight:600}}>All done! 🎉</div>
+            ) : (
+              <div style={{fontSize:13,color:"#2E4A6A"}}>Add milestones below</div>
+            )}
+          </div>
+        </div>
+
+        {/* Last completed */}
+        {doneSteps.length > 0 && (
+          <div style={{background:"#111E33",border:"1px solid #1A2E4A",borderRadius:12,padding:"12px 14px",marginBottom:16,
+            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:9,color:"#4A6280",letterSpacing:"1px",textTransform:"uppercase",marginBottom:4}}>Last Completed</div>
+              <div style={{fontSize:14,color:"#00D4AA",fontWeight:600}}>{doneSteps[doneSteps.length-1].label}</div>
+            </div>
+            <div style={{fontSize:18,color:"#00D4AA"}}>✓</div>
+          </div>
+        )}
+      </div>
+
+      {/* ── All milestones list ── */}
+      <div className="section-label">All Milestones</div>
+      <div style={{padding:"0 16px 100px"}}>
+        {roadmap.map((step,idx)=>{
+          const isLast = idx===roadmap.length-1;
+          const col = step.status==="done"?"#00D4AA":step.status==="current"?"#E8EEF6":"#2E4A6A";
+          return (
+            <div key={step.id} style={{
+              background:"#111E33",
+              border:`1px solid ${step.status==="current"?"#00D4AA40":"#1A2E4A"}`,
+              borderRadius:12,padding:"12px 14px",marginBottom:6,
+              opacity:step.status==="future"?0.65:1
+            }}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:8}}>
+                <div style={{flex:1}}>
+                  {editId===step.id?(
+                    <div style={{display:"flex",gap:8,marginBottom:4}}>
+                      <input className="text-input" style={{flex:1,padding:"6px 10px",fontSize:14}}
+                        value={editVal} onChange={e=>setEditVal(e.target.value)}/>
+                      <button className="add-btn" style={{padding:"6px 12px",fontSize:13}} onClick={()=>saveEdit(step.id)}>Save</button>
+                    </div>
+                  ):(
+                    <div style={{fontSize:14,fontWeight:600,color:col,marginBottom:3}}>{step.label}</div>
+                  )}
+                  {step.status==="done"&&(
+                    <div style={{fontSize:11,color:"#4A6280"}}>
+                      {editDateId===step.id?(
+                        <input className="tbl-input" style={{width:130,fontSize:11,display:"inline"}}
+                          value={editDateVal} onChange={e=>setEditDateVal(e.target.value)}
+                          onBlur={()=>saveDate(step.id)} onKeyDown={e=>e.key==="Enter"&&saveDate(step.id)} autoFocus/>
+                      ):(
+                        <span className="roadmap-edit-date"
+                          onClick={()=>{setEditDateId(step.id);setEditDateVal(step.completedAt||"");}}>
+                          ✓ {step.completedAt||"tap to set date"}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {step.status==="current"&&<span className="step-badge badge-current" style={{fontSize:9}}>Current</span>}
+                </div>
+                <div style={{display:"flex",gap:4,flexWrap:"wrap",justifyContent:"flex-end"}}>
+                  {step.status!=="done"&&<button className="roadmap-btn rmbtn-done" onClick={()=>markDone(step.id)}>✓</button>}
+                  {step.status!=="current"&&<button className="roadmap-btn rmbtn-current" onClick={()=>setStatus(step.id,"current")}>Current</button>}
+                  {idx>0&&<button className="roadmap-btn rmbtn-up" onClick={()=>moveStep(step.id,"up")}>↑</button>}
+                  {!isLast&&<button className="roadmap-btn rmbtn-down" onClick={()=>moveStep(step.id,"down")}>↓</button>}
+                  {editId!==step.id&&<button className="roadmap-btn" style={{background:"#1A2E4A",color:"#C8D8E8"}}
+                    onClick={()=>{setEditId(step.id);setEditVal(step.label);}}>✎</button>}
+                  <button className="roadmap-btn rmbtn-del" onClick={()=>deleteStep(step.id)}>✕</button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {showAdd?(
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <input className="text-input" style={{flex:1}} placeholder="New milestone…"
+              value={newLabel} onChange={e=>setNewLabel(e.target.value)}/>
+            <button className="add-btn" onClick={addStep}>Add</button>
+          </div>
+        ):(
+          <button className="form-save-btn" style={{marginTop:8}} onClick={()=>setShowAdd(true)}>+ Add Milestone</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ─── InvestScreen (inside SettingsScreen tab) ─────────────────────────────────
+
+const EMPTY_INVEST = { name:"", current:"", goal:"", targetType:"date", targetDate:"", targetAge:"", notes:"" };
+
+function InvestForm({ inv, onSave, onCancel }) {
+  const [v, setV] = useState(inv);
+  function set(k, val) { setV(prev=>({...prev,[k]:val})); }
+  return (
+    <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&onCancel()}>
+      <div className="modal">
+        <div className="modal-title">{inv.id ? "Edit Goal" : "Add Investment Goal"}</div>
+        <div className="form-group">
+          <label className="form-label">Account Name</label>
+          <input className="form-input" placeholder="e.g. Roth IRA" value={v.name} onChange={e=>set("name",e.target.value)}/>
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Current Balance</label>
+            <input className="form-input" placeholder="0.00" type="number" inputMode="decimal" value={v.current} onChange={e=>set("current",e.target.value)}/>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Goal Balance</label>
+            <input className="form-input" placeholder="0.00" type="number" inputMode="decimal" value={v.goal} onChange={e=>set("goal",e.target.value)}/>
+          </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">Target Type</label>
+          <select className="form-select" value={v.targetType} onChange={e=>set("targetType",e.target.value)}>
+            <option value="date">Target Date</option>
+            <option value="age">Target Age</option>
+          </select>
+        </div>
+        {v.targetType === "date" && (
+          <div className="form-group">
+            <label className="form-label">Target Date</label>
+            <input className="form-input" placeholder="e.g. Dec 2035" value={v.targetDate} onChange={e=>set("targetDate",e.target.value)}/>
+          </div>
+        )}
+        {v.targetType === "age" && (
+          <div className="form-group">
+            <label className="form-label">Target Age</label>
+            <input className="form-input" placeholder="e.g. 65" type="number" inputMode="numeric" value={v.targetAge} onChange={e=>set("targetAge",e.target.value)}/>
+          </div>
+        )}
+        <div className="form-group">
+          <label className="form-label">Notes</label>
+          <input className="form-input" placeholder="Optional" value={v.notes} onChange={e=>set("notes",e.target.value)}/>
+        </div>
+        <button className="form-save-btn" onClick={()=>onSave(v)}>Save Goal</button>
+        <button className="form-cancel-btn" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function InvestScreen({ investments, onAddInvest, onEditInvest, onDeleteInvest }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing,  setEditing]  = useState(null);
+
+  function handleSave(v) {
+    if (v.id) onEditInvest(v); else onAddInvest(v);
+    setShowForm(false); setEditing(null);
+  }
+
+  return (
+    <div className="screen">
+      <div className="screen-title">Investment Goals</div>
+
+      {investments.length === 0 && (
+        <div className="history-empty">No investment goals yet.<br/>Tap + to add one.</div>
+      )}
+
+      <div className="invest-list">
+        {investments.map(inv => {
+          const cur  = parseFloat(inv.current) || 0;
+          const goal = parseFloat(inv.goal) || 0;
+          const pct  = goal > 0 ? Math.min(100, Math.round((cur/goal)*100)) : 0;
+          const target = inv.targetType === "age" ? `By age ${inv.targetAge}` : inv.targetDate || "No target set";
+          return (
+            <div className="invest-card" key={inv.id}>
+              <div className="invest-top">
+                <div>
+                  <div className="invest-name">{inv.name}</div>
+                  <div className="invest-date">{target}</div>
+                </div>
+                <div className="invest-pct">{pct}%</div>
+              </div>
+              <div className="invest-track">
+                <div><div className="invest-track-lbl">Current</div><div className="invest-track-val">{fmt(cur)}</div></div>
+                <div style={{textAlign:"right"}}><div className="invest-track-lbl">Goal</div><div className="invest-track-val">{fmt(goal)}</div></div>
+              </div>
+              <div className="progress-bar">
+                <div className="progress-fill" style={{width:`${pct}%`}}/>
+              </div>
+              {inv.notes && <div style={{fontSize:12,color:"#4A6280",marginBottom:10}}>{inv.notes}</div>}
+              <div className="invest-actions">
+                <button className="bill-action-btn btn-edit" onClick={()=>{setEditing(inv);setShowForm(true);}}>Edit</button>
+                <button className="bill-action-btn btn-delete" onClick={()=>onDeleteInvest(inv.id)}>Remove</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button className="fab" onClick={()=>{setEditing(null);setShowForm(true);}}>+</button>
+
+      {showForm && (
+        <InvestForm
+          inv={editing || EMPTY_INVEST}
+          onSave={handleSave}
+          onCancel={()=>{setShowForm(false);setEditing(null);}}
+        />
+      )}
+    </div>
+  );
+}
+
+
+// ─── AccountsScreen ───────────────────────────────────────────────────────────
+
+const ROLE_COLORS = { spending_bank:"#00D4AA", bills_bank:"#9B88FF", credit_card:"#F5A623", holding:"#4A6280" };
+const ROLE_LABELS = { spending_bank:"Spending", bills_bank:"Bills", credit_card:"Credit Card", holding:"Holding" };
+
+function AccountsScreen({ accounts, snapshots, onSetRole, onReorder,
+                          onRemoveAccount, onAddAccount, onSetDueDay, latestBalance }) {
+  const [newLabel, setNewLabel] = useState("");
+  const [newLast4, setNewLast4] = useState("");
+  const [newRole,  setNewRole]  = useState("spending_bank");
+  const [expandId, setExpandId] = useState(null);
+
+  const spendingBanks = accounts.filter(a => a.role === "spending_bank").sort((a,b) => (a.incomeRank??99)-(b.incomeRank??99));
+  const billsBanks    = accounts.filter(a => a.role === "bills_bank");
+  const creditCards   = accounts.filter(a => a.role === "credit_card");
+  const holdingAccts  = accounts.filter(a => a.role === "holding");
+  const incomeAccts   = spendingBanks;
+  const spendingAccts = creditCards;
+
+  function handleAdd() {
+    const l4 = newLast4.replace(/\D/g,"").slice(-4);
+    if (l4.length !== 4 || !newLabel.trim()) return;
+    onAddAccount(l4, newLabel.trim(), newRole);
+    setNewLabel(""); setNewLast4("");
+  }
+
+  function AccountRow({ a, i, totalInRole }) {
+    const bal = latestBalance(a.last4);
+    const color = ROLE_COLORS[a.role] || "#4A6280";
+    const expanded = expandId === a.last4;
+    return (
+      <div style={{
+        background:"#111E33", border:`1px solid ${expanded ? color+"60" : "#1A2E4A"}`,
+        borderRadius:14, marginBottom:8, overflow:"hidden",
+        transition:"border-color .2s"
+      }}>
+        {/* Main row */}
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 16px",cursor:"pointer"}}
+          onClick={()=>setExpandId(expanded ? null : a.last4)}>
+          <div style={{display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:10,height:10,borderRadius:"50%",background:color,flexShrink:0}}/>
+            <div>
+              <div style={{fontSize:14,fontWeight:600,color:"#E8EEF6"}}>{a.label}</div>
+              <div style={{fontSize:12,color:"#4A6280",marginTop:2}}>
+                •••• {a.last4}
+                <span style={{marginLeft:8,fontSize:10,fontWeight:600,padding:"1px 6px",borderRadius:8,
+                  background:color+"20",color:color}}>{ROLE_LABELS[a.role]}</span>
+                {a.role==="spending_bank" && <span style={{marginLeft:6,fontSize:10,color:"#2E4A6A"}}>{rankName(a.incomeRank)}</span>}
+              </div>
+            </div>
+          </div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            {bal !== null
+              ? <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:600,color:"#E8EEF6"}}>{fmt(bal)}</div>
+              : <div style={{fontSize:13,color:"#2E4A6A"}}>—</div>}
+            <div style={{fontSize:12,color:"#2E4A6A"}}>{expanded?"▲":"▼"}</div>
+          </div>
+        </div>
+
+        {/* Expanded controls */}
+        {expanded && (
+          <div style={{borderTop:"1px solid #1A2E4A",padding:"12px 16px",display:"flex",flexDirection:"column",gap:10}}>
+            {/* Role switcher */}
+            <div>
+              <div style={{fontSize:11,color:"#4A6280",marginBottom:6,letterSpacing:"1px",textTransform:"uppercase"}}>Role</div>
+              <div style={{display:"flex",gap:6}}>
+                {["spending_bank","bills_bank","credit_card","holding"].map(r=>(
+                  <button key={r} onClick={()=>onSetRole(a.last4,r)}
+                    style={{padding:"5px 12px",borderRadius:20,border:"none",cursor:"pointer",
+                      fontFamily:"'DM Sans',sans-serif",fontSize:12,fontWeight:600,
+                      background: a.role===r ? (ROLE_COLORS[r]||"#4A6280") : (ROLE_COLORS[r]||"#4A6280")+"20",
+                      color: a.role===r ? "#0A1628" : (ROLE_COLORS[r]||"#4A6280")}}>
+                    {ROLE_LABELS[r]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Income rank reorder */}
+            {a.role==="spending_bank" && (
+              <div>
+                <div style={{fontSize:11,color:"#4A6280",marginBottom:6,letterSpacing:"1px",textTransform:"uppercase"}}>Priority</div>
+                <div style={{display:"flex",gap:6}}>
+                  {i > 0 && <button className="pill pill-up" onClick={()=>onReorder(a.last4,"up")}>↑ Move up</button>}
+                  {i < totalInRole-1 && <button className="pill pill-down" onClick={()=>onReorder(a.last4,"down")}>↓ Move down</button>}
+                </div>
+              </div>
+            )}
+
+            {/* Due day for spending */}
+            {a.role==="credit_card" && (
+              <div>
+                <div style={{fontSize:11,color:"#4A6280",marginBottom:6,letterSpacing:"1px",textTransform:"uppercase"}}>Due Day</div>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <input className="text-input" style={{maxWidth:80,padding:"7px 10px",fontSize:13}}
+                    placeholder="e.g. 15" type="number" inputMode="numeric" min="1" max="31"
+                    defaultValue={a.dueDay??""} key={a.last4+"_due"}
+                    onBlur={e=>onSetDueDay(a.last4,e.target.value||null)}/>
+                  <span style={{fontSize:12,color:"#2E4A6A"}}>of each month</span>
+                </div>
+              </div>
+            )}
+
+            {/* Float for spending_bank and bills_bank */}
+            {(a.role==="spending_bank" || a.role==="bills_bank") && (
+              <div>
+                <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:8}}>
+                  <div style={{fontSize:11,color:"#4A6280",letterSpacing:"1px",textTransform:"uppercase"}}>Operating Float</div>
+                  <button className={`toggle ${a.floatEnabled!==false?"on":"off"}`}
+                    onClick={()=>onSetDueDay(a.last4+"_floatEnabled",a.floatEnabled===false?"on":"off")}>
+                    <div className="toggle-knob"/>
+                  </button>
+                </div>
+                {a.floatEnabled!==false && (
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <input className="text-input" style={{maxWidth:70,padding:"7px 10px",fontSize:13}}
+                      placeholder="1.5" type="number" inputMode="decimal" step="0.1"
+                      defaultValue={a.floatMultiplier??1.5} key={a.last4+"_float"}
+                      onBlur={e=>onSetDueDay(a.last4+"_float",e.target.value||"1.5")}/>
+                    <span style={{fontSize:12,color:"#2E4A6A"}}>× monthly flow target</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Remove */}
+            <button className="pill pill-red" style={{alignSelf:"flex-start"}}
+              onClick={()=>{onRemoveAccount(a.last4);setExpandId(null);}}>
+              Remove account
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const allSorted = [
+    ...spendingBanks,
+    ...billsBanks,
+    ...creditCards,
+    ...holdingAccts,
+  ];
+
+  return (
+    <div className="screen">
+      <div className="header">
+        <div className="header-label">Accounts</div>
+        <div style={{fontSize:13,color:"#4A6280"}}>{accounts.length} total</div>
+      </div>
+
+      <div style={{padding:"0 16px",marginBottom:24}}>
+        {allSorted.length === 0 && (
+          <div className="history-empty">No accounts yet.<br/>Add your first account below.</div>
+        )}
+        {allSorted.map((a,i) => {
+          const inRole = a.role==="spending_bank" ? spendingBanks : a.role==="bills_bank" ? billsBanks : a.role==="credit_card" ? creditCards : holdingAccts;
+          const idxInRole = inRole.findIndex(x=>x.last4===a.last4);
+          return <AccountRow key={a.last4} a={a} i={idxInRole} totalInRole={inRole.length}/>;
+        })}
+      </div>
+
+      {/* Add Account */}
+      <div className="section-label">Add Account</div>
+      <div className="add-form">
+        <div className="add-form-title">New Account</div>
+        <div className="role-toggle">
+          {["spending_bank","bills_bank","credit_card","holding"].map(r=>(
+            <button key={r} className={`role-btn ${newRole===r?"active":""}`} onClick={()=>setNewRole(r)}>
+              {ROLE_LABELS[r]}
+            </button>
+          ))}
+        </div>
+        <div className="input-row" style={{marginBottom:10}}>
+          <input className="text-input" placeholder="Label (e.g. Chase Checking)"
+            value={newLabel} onChange={e=>setNewLabel(e.target.value)}/>
+        </div>
+        <div className="input-row">
+          <input className="text-input" placeholder="Last 4 digits" value={newLast4}
+            maxLength={4} onChange={e=>setNewLast4(e.target.value)} inputMode="numeric"/>
+          <button className="add-btn" onClick={handleAdd}>Add</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+// ─── HoldingsTab ─────────────────────────────────────────────────────────────
+// Accounts with role "holding" — balances visible, not in Safe-to-Spend calc
+
+function HoldingsTab({ accounts, snapshots, investments, latestBalance, investThresholds,
+                       onAddInvest, onEditInvest, onDeleteInvest }) {
+  const holdingAccts = accounts.filter(a => a.role === "holding");
+  const totalHeld    = holdingAccts.reduce((s,a) => s + (latestBalance(a.last4)??0), 0);
+  const totalGoal    = investments.reduce((s,i) => s + (parseFloat(i.goal)||0), 0);
+  const totalInvested= investments.reduce((s,i) => s + (parseFloat(i.current)||0), 0);
+  const overallPct   = totalGoal > 0 ? Math.min(100, Math.round((totalInvested/totalGoal)*100)) : 0;
+
+  const [showForm, setShowForm] = useState(false);
+  const [editing,  setEditing]  = useState(null);
+  function handleSave(v) {
+    if (v.id) onEditInvest(v); else onAddInvest(v);
+    setShowForm(false); setEditing(null);
+  }
+
+  return (
+    <div className="screen">
+      <div className="header">
+        <div className="header-label">Investments</div>
+        <div style={{fontSize:13,color:"#4A6280"}}>{overallPct}% to goal</div>
+      </div>
+
+      {/* Total holdings hero */}
+      <div className="invest-tab-hero">
+        <div className="invest-total-label">Total Holdings</div>
+        <div className="invest-total-val" style={{color: (() => {
+          const pct = overallPct;
+          const g=parseInt(investThresholds?.green||75), y=parseInt(investThresholds?.yellow||40), r=parseInt(investThresholds?.red||10);
+          return pct>=g?"#00D4AA":pct>=y?"#F5C842":pct>=r?"#F5A623":"#FF6B6B";
+        })()}}>{fmtShort(totalHeld)}</div>
+        <div className="invest-total-sub">
+          {holdingAccts.length} account{holdingAccts.length!==1?"s":""} · not counted in Safe to Spend
+        </div>
+        {totalGoal > 0 && (
+          <>
+            <div style={{marginTop:16}}>
+              <div style={{display:"flex",justifyContent:"space-between",marginBottom:6}}>
+                <span style={{fontSize:12,color:"#4A6280"}}>Overall goal progress</span>
+                <span style={{fontSize:12,color:"#00D4AA",fontFamily:"'Space Grotesk',monospace"}}>{overallPct}%</span>
+              </div>
+              <div className="progress-bar" style={{height:8}}>
+                <div className="progress-fill" style={{width:`${overallPct}%`}}/>
+              </div>
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+                <span style={{fontSize:11,color:"#4A6280"}}>{fmt(totalInvested)} invested</span>
+                <span style={{fontSize:11,color:"#4A6280"}}>{fmt(totalGoal)} goal</span>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Holding account balances */}
+      {holdingAccts.length > 0 && (
+        <>
+          <div className="section-label">Accounts</div>
+          <div className="holding-list">
+            {holdingAccts.map(a => {
+              const bal = latestBalance(a.last4);
+              // Match to investment goal
+              const goal = investments.find(i => i.linkedAcct === a.last4);
+              const pct  = goal && parseFloat(goal.goal)>0
+                ? Math.min(100,Math.round(((bal??0)/parseFloat(goal.goal))*100)) : null;
+              return (
+                <div className="holding-card" key={a.last4}>
+                  <div>
+                    <div className="holding-label">{a.label}</div>
+                    <div className="holding-last4">•••• {a.last4}</div>
+                    {goal && <div style={{fontSize:11,color:"#4A6280",marginTop:3}}>Goal: {fmt(parseFloat(goal.goal)||0)}</div>}
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    {bal !== null
+                      ? <div className="holding-bal">{fmt(bal)}</div>
+                      : <div style={{fontSize:13,color:"#2E4A6A"}}>No balance</div>}
+                    {pct !== null && <div style={{fontSize:11,color:"#4A6280",marginTop:2}}>{pct}%</div>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {holdingAccts.length === 0 && (
+        <div className="history-empty">
+          No investment accounts yet.<br/>
+          Add accounts in Settings and set their role to "Holding".
+        </div>
+      )}
+
+      {/* Investment Goals */}
+      <div className="section-label">Goals</div>
+      <div className="invest-list" style={{marginBottom:100}}>
+        {investments.length === 0 && (
+          <div className="history-empty" style={{padding:"24px 0"}}>No goals yet. Tap + to add one.</div>
+        )}
+        {investments.map(inv => {
+          const cur  = parseFloat(inv.current) || 0;
+          const goal = parseFloat(inv.goal) || 0;
+          const pct  = goal > 0 ? Math.min(100, Math.round((cur/goal)*100)) : 0;
+          const target = inv.targetType==="age" ? `By age ${inv.targetAge}` : inv.targetDate||"No target set";
+          return (
+            <div className="invest-card" key={inv.id}>
+              <div className="invest-top">
+                <div>
+                  <div className="invest-name">{inv.name}</div>
+                  <div className="invest-date">{target}</div>
+                </div>
+                <div className="invest-pct">{pct}%</div>
+              </div>
+              <div className="invest-track">
+                <div><div className="invest-track-lbl">Current</div><div className="invest-track-val">{fmt(cur)}</div></div>
+                <div style={{textAlign:"right"}}><div className="invest-track-lbl">Goal</div><div className="invest-track-val">{fmt(goal)}</div></div>
+              </div>
+              <div className="progress-bar"><div className="progress-fill" style={{width:`${pct}%`}}/></div>
+              {inv.notes && <div style={{fontSize:12,color:"#4A6280",marginBottom:10}}>{inv.notes}</div>}
+              <div className="invest-actions">
+                <button className="bill-action-btn btn-edit" onClick={()=>{setEditing(inv);setShowForm(true);}}>Edit</button>
+                <button className="bill-action-btn btn-delete" onClick={()=>onDeleteInvest(inv.id)}>Remove</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <button className="fab" onClick={()=>{setEditing(null);setShowForm(true);}}>+</button>
+      {showForm && (
+        <InvestForm inv={editing||EMPTY_INVEST} onSave={handleSave}
+          onCancel={()=>{setShowForm(false);setEditing(null);}}/>
+      )}
+    </div>
+  );
+}
+
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [tab, setTab]               = useState("home");
+  const [tab, setTab]               = useState("spending");
   const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
   const [snapshots, setSnapshots]   = useState(() => load("s2s_snapshots",     DEFAULT_SNAPSHOTS));
   const [thresholds, setThresholds] = useState(() => load("s2s_thresholds",    DEFAULT_THRESHOLDS));
   const [thresholdMode, setThresholdMode] = useState(() => load("s2s_tmode",   DEFAULT_THRESHOLD_MODE));
-  const [dueThresholds, setDueThresholds] = useState(() => load("s2s_due_thr", DEFAULT_DUE_THRESHOLDS));
+  const [dueThresholds,    setDueThresholds]    = useState(() => load("s2s_due_thr",    DEFAULT_DUE_THRESHOLDS));
+  const [investThresholds, setInvestThresholds] = useState(() => load("s2s_inv_thr",   DEFAULT_INVEST_THRESHOLDS));
+
+  const [bills,       setBills]       = useState(() => load("s2s_bills",       []));
+  const [paycheck,    setPaycheck]    = useState(() => load("s2s_paycheck",    { netPay:"", frequency:"biweekly" }));
+  const [roadmap,     setRoadmap]     = useState(() => load("s2s_roadmap",     DEFAULT_ROADMAP));
+    const [investments, setInvestments] = useState(() => load("s2s_investments", []));
   const [heroKey, setHeroKey]       = useState(0);
   const [smsText, setSmsText]       = useState("");
   const [smsResult, setSmsResult]   = useState(null);
@@ -813,13 +2470,19 @@ export default function App() {
   const [manualBal, setManualBal]   = useState("");
   const [toast, setToast]           = useState(null);
   const toastRef = useRef();
+  const _swipeX   = useRef(0);
 
   // Persist to localStorage via wrapper setters below
   function setAccountsP(v)      { const val = typeof v === "function" ? v(accounts)  : v; save("s2s_accounts",   val); setAccounts(val);      }
   function setSnapshotsP(v)     { const val = typeof v === "function" ? v(snapshots) : v; save("s2s_snapshots",  val); setSnapshots(val);     }
   function setThresholdsP(v)    { const val = typeof v === "function" ? v(thresholds): v; save("s2s_thresholds", val); setThresholds(val);    }
   function setThresholdModeP(v) { const val = typeof v === "function" ? v(thresholdMode):v; save("s2s_tmode",   val); setThresholdMode(val); }
-  function setDueThresholdsP(v) { const val = typeof v === "function" ? v(dueThresholds):v; save("s2s_due_thr", val); setDueThresholds(val); }
+  function setDueThresholdsP(v)    { const val = typeof v === "function" ? v(dueThresholds):v;    save("s2s_due_thr",    val); setDueThresholds(val);    }
+  function setInvestThresholdsP(v) { const val = typeof v === "function" ? v(investThresholds):v; save("s2s_inv_thr",   val); setInvestThresholds(val); }
+  function setBillsP(v)          { const val = typeof v === "function" ? v(bills):v;          save("s2s_bills",       val); setBills(val);         }
+  function setPaycheckP(v)       { const val = typeof v === "function" ? v(paycheck):v;       save("s2s_paycheck",    val); setPaycheck(val);      }
+  function setRoadmapP(v)        { const val = typeof v === "function" ? v(roadmap):v;        save("s2s_roadmap",     val); setRoadmap(val);       }
+  function setInvestmentsP(v)    { const val = typeof v === "function" ? v(investments):v;    save("s2s_investments", val); setInvestments(val);   }
 
   function showToast(msg) {
     setToast(null);
@@ -867,8 +2530,8 @@ export default function App() {
 
     // Normal digits path
     if (!accounts.find(a => a.last4 === result.accountLast4)) {
-      const nextRank = accounts.filter(a => a.role === "income").length;
-      setAccountsP(prev => [...prev, { last4: result.accountLast4, label: result.label + " •" + result.accountLast4, role: "income", incomeRank: nextRank }]);
+      const nextRank = accounts.filter(a => a.role === "spending_bank").length;
+      setAccountsP(prev => [...prev, { last4: result.accountLast4, label: result.label + " •" + result.accountLast4, role: "spending_bank", incomeRank: nextRank }]);
     }
     if (!ingestBalance(result.accountLast4, result.balance, "sms")) {
       setSmsResult({ ok:false, msg:"Duplicate — same balance within 2 minutes." }); return;
@@ -900,10 +2563,11 @@ export default function App() {
       const updated = prev.map(a => {
         if (a.last4 !== last4) return a;
         if (newRole === "income") {
-          const maxRank = Math.max(-1, ...prev.filter(x => x.role === "income" && x.last4 !== last4).map(x => x.incomeRank));
-          return { ...a, role: "income", incomeRank: maxRank + 1 };
+          const maxRank = Math.max(-1, ...prev.filter(x => x.role === "spending_bank" && x.last4 !== last4).map(x => x.incomeRank));
+          return { ...a, role: "spending_bank", incomeRank: maxRank + 1 };
         }
-        return { ...a, role: "spending", incomeRank: null };
+        if (newRole === "holding") return { ...a, role: "holding", incomeRank: null };
+        return { ...a, role: "credit_card", incomeRank: null };
       });
       return rerank(updated);
     });
@@ -912,10 +2576,10 @@ export default function App() {
   }
 
   function rerank(accts) {
-    const income = accts.filter(a => a.role === "income").sort((a,b) => (a.incomeRank ?? 99) - (b.incomeRank ?? 99));
+    const income = accts.filter(a => a.role === "spending_bank").sort((a,b) => (a.incomeRank ?? 99) - (b.incomeRank ?? 99));
     let rank = 0;
     return accts.map(a => {
-      if (a.role !== "income") return a;
+      if (a.role !== "spending_bank") return a;
       const r = income.findIndex(x => x.last4 === a.last4);
       return { ...a, incomeRank: r };
     });
@@ -923,7 +2587,7 @@ export default function App() {
 
   function handleReorder(last4, dir) {
     setAccountsP(prev => {
-      const income = prev.filter(a => a.role === "income").sort((a,b) => a.incomeRank - b.incomeRank);
+      const income = prev.filter(a => a.role === "spending_bank").sort((a,b) => a.incomeRank - b.incomeRank);
       const idx = income.findIndex(a => a.last4 === last4);
       const swapIdx = dir === "up" ? idx - 1 : idx + 1;
       if (swapIdx < 0 || swapIdx >= income.length) return prev;
@@ -942,31 +2606,62 @@ export default function App() {
     showToast("Account removed");
   }
 
-  function handleSetDueDay(last4, day) {
-    setAccountsP(prev => prev.map(a => a.last4 === last4 ? { ...a, dueDay: day ? parseInt(day) : null } : a));
+  function handleSetDueDay(key, val) {
+    if (key.endsWith("_floatEnabled")) {
+      const last4 = key.replace("_floatEnabled","");
+      setAccountsP(prev => prev.map(a => a.last4===last4 ? {...a, floatEnabled: val==="on"} : a));
+    } else if (key.endsWith("_float")) {
+      const last4 = key.replace("_float","");
+      setAccountsP(prev => prev.map(a => a.last4===last4 ? {...a, floatMultiplier: parseFloat(val)||1.5} : a));
+    } else {
+      setAccountsP(prev => prev.map(a => a.last4===key ? {...a, dueDay: val ? parseInt(val) : null} : a));
+    }
   }
 
   function handleAddAccount(l4, label, role) {
     if (accounts.find(a => a.last4 === l4)) { showToast("Account already exists"); return; }
-    const nextRank = role === "income" ? accounts.filter(a => a.role === "income").length : null;
+    const nextRank = role === "spending_bank" ? accounts.filter(a => a.role === "spending_bank").length : null;
     setAccountsP(prev => [...prev, { last4: l4, label, role, incomeRank: nextRank }]);
     showToast("Account added");
   }
 
+  // ── Bill handlers ──────────────────────────────────────────────────────────
+  function handleAddBill(b)    { const nb = {...b, id: Date.now()}; setBillsP(prev => [...prev, nb]); showToast("Bill added"); }
+  function handleEditBill(b)   { setBillsP(prev => prev.map(x => x.id === b.id ? b : x)); showToast("Bill updated"); }
+  function handleDeleteBill(id){ setBillsP(prev => prev.filter(x => x.id !== id)); showToast("Bill removed"); }
+
+  // ── Investment handlers ──────────────────────────────────────────────────
+  function handleAddInvest(v)    { setInvestmentsP(prev => [...prev, {...v, id: Date.now()}]); showToast("Goal added"); }
+  function handleEditInvest(v)   { setInvestmentsP(prev => prev.map(x => x.id === v.id ? v : x)); showToast("Goal updated"); }
+  function handleDeleteInvest(id){ setInvestmentsP(prev => prev.filter(x => x.id !== id)); showToast("Goal removed"); }
+
   const NAV = [
-    { id:"home",     label:"Home",     Icon:IconHome     },
-    { id:"history",  label:"History",  Icon:IconHistory  },
-    { id:"settings", label:"Settings", Icon:IconSettings },
+    { id:"dashboard", label:"Dashboard",Icon:IconDashboard },
+    { id:"spending",  label:"Spending", Icon:IconHome      },
+    { id:"bills",     label:"Bills",    Icon:IconBills     },
+    { id:"invest",    label:"Invest",   Icon:IconInvest    },
+    { id:"roadmap",   label:"Roadmap",  Icon:IconRoadmap   },
+    { id:"accounts",  label:"Accounts", Icon:IconAccounts  },
+    { id:"settings",  label:"Settings", Icon:IconSettings  },
   ];
 
   return (
     <>
       <style>{S}</style>
-      <div className="app">
+      <div className="app"
+        onTouchStart={e=>{_swipeX.current=e.touches[0].clientX;}}
+        onTouchEnd={e=>{
+          const dx=e.changedTouches[0].clientX - _swipeX.current;
+          if(Math.abs(dx)<50)return;
+          const ids=NAV.map(n=>n.id);
+          const cur=ids.indexOf(tab);
+          if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
+          if(dx>0 && cur>0)            setTab(ids[cur-1]);
+        }}>
         {toast && <div className="toast" key={toast}>{toast}</div>}
 
-        {tab === "home" && (
-          <HomeScreen
+        {tab === "spending" && (
+          <SpendingScreen
             accounts={accounts} snapshots={snapshots}
             safeToSpend={safeToSpend} residuals={residuals}
             thresholds={thresholds} thresholdMode={thresholdMode}
@@ -980,17 +2675,48 @@ export default function App() {
             latestBalance={latestBalance} firstBalance={firstBalance} dueThresholds={dueThresholds}
           />
         )}
-        {tab === "history" && (
-          <HistoryScreen snapshots={snapshots} accounts={accounts} />
+        {tab === "dashboard" && (
+          <DashboardScreen
+            safeToSpend={safeToSpend} thresholds={thresholds} thresholdMode={thresholdMode}
+            firstBalance={firstBalance} accounts={accounts} bills={bills}
+            paycheck={paycheck} roadmap={roadmap} snapshots={snapshots}
+            latestBalance={latestBalance} dueThresholds={dueThresholds}
+          />
+        )}
+        {tab === "bills" && (
+          <BillsScreen
+            bills={bills} accounts={accounts}
+            onAddBill={handleAddBill} onEditBill={handleEditBill} onDeleteBill={handleDeleteBill}
+            latestBalance={latestBalance} dueThresholds={dueThresholds}
+            paycheck={paycheck} onSavePaycheck={setPaycheckP}
+          />
+        )}
+
+        {tab === "accounts" && (
+          <AccountsScreen
+            accounts={accounts} snapshots={snapshots}
+            onSetRole={handleSetRole} onReorder={handleReorder}
+            onRemoveAccount={handleRemoveAccount} onAddAccount={handleAddAccount}
+            onSetDueDay={handleSetDueDay} latestBalance={latestBalance}
+          />
+        )}
+        {tab === "roadmap" && (
+          <KataRoadmap roadmap={roadmap} onUpdateRoadmap={setRoadmapP} />
+        )}
+        {tab === "invest" && (
+          <HoldingsTab
+            accounts={accounts} snapshots={snapshots} investments={investments}
+            latestBalance={latestBalance} investThresholds={investThresholds}
+            onAddInvest={handleAddInvest} onEditInvest={handleEditInvest} onDeleteInvest={handleDeleteInvest}
+          />
         )}
         {tab === "settings" && (
           <SettingsScreen
-            accounts={accounts} thresholds={thresholds} thresholdMode={thresholdMode}
-            onSetRole={handleSetRole} onReorder={handleReorder}
-            onRemoveAccount={handleRemoveAccount} onAddAccount={handleAddAccount}
+            thresholds={thresholds} thresholdMode={thresholdMode}
+            dueThresholds={dueThresholds} investThresholds={investThresholds}
             onSaveThresholds={setThresholdsP} onSaveThresholdMode={setThresholdModeP}
-            dueThresholds={dueThresholds} onSaveDueThresholds={setDueThresholdsP}
-            onSetDueDay={handleSetDueDay}
+            onSaveDueThresholds={setDueThresholdsP} onSaveInvestThresholds={setInvestThresholdsP}
+            snapshots={snapshots} accounts={accounts}
           />
         )}
 
@@ -998,6 +2724,7 @@ export default function App() {
           {NAV.map(({ id, label, Icon }) => (
             <button key={id} className={`nav-btn ${tab === id ? "active" : ""}`} onClick={() => setTab(id)}>
               <Icon /><span className="nav-label">{label}</span>
+              {tab===id && <div style={{width:3,height:3,borderRadius:"50%",background:"#00D4AA",marginTop:1}}/>}
             </button>
           ))}
         </nav>

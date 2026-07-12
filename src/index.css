@@ -3,4 +3,5 @@ html, body, #root {
   padding: 0;
   min-height: 100vh;
   background: #0A1628;
+  overscroll-behavior: none;
 }
