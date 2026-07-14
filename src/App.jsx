@@ -205,7 +205,7 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const S2S_VERSION = "v1.2";
+const S2S_VERSION = "v1.3";
 
 function initStorage() {
   try {
@@ -912,9 +912,9 @@ function buildExportRows(accounts, snapshots, bills, paycheck, billsOverride,
   });
 
   // THRESHOLDS
-  rows.push({ Type:"THRESHOLD", threshType:"spending", hi:thresholds.hi, mid:thresholds.mid, lo:thresholds.lo, mode:thresholdMode });
-  rows.push({ Type:"THRESHOLD", threshType:"due",      hi:dueThresholds.green, mid:dueThresholds.yellow, lo:dueThresholds.red, mode:"days" });
-  rows.push({ Type:"THRESHOLD", threshType:"invest",   hi:investThresholds.green, mid:investThresholds.yellow, lo:investThresholds.red, mode:"percent" });
+  rows.push({ Type:"THRESHOLD", threshType:"spending", hi:thresholds?.hi,         mid:thresholds?.mid,         lo:thresholds?.lo,         mode:thresholdMode||"percent" });
+  rows.push({ Type:"THRESHOLD", threshType:"due",      hi:dueThresholds?.green,    mid:dueThresholds?.yellow,   lo:dueThresholds?.red,     mode:"days" });
+  rows.push({ Type:"THRESHOLD", threshType:"invest",   hi:investThresholds?.green, mid:investThresholds?.yellow,lo:investThresholds?.red,  mode:"percent" });
 
   return rows;
 }
@@ -1137,23 +1137,24 @@ function ExportImportPanel({ exportArgs, importCallbacks, showToast }) {
       };
       reader.readAsText(file);
     } else if (ext === "xlsx" || ext === "xls") {
+      // SheetJS loaded via <script> tag in index.html — available as window.XLSX
+      if (!window.XLSX) {
+        setImportMsg({ ok:false, msg:"XLSX library not loaded yet. Try again in a moment." });
+        setImporting(false);
+        return;
+      }
       const reader = new FileReader();
       reader.onload = ev => {
         try {
-          // Dynamically import SheetJS
-          import("https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.mjs").then(XLSX => {
-            const wb   = XLSX.read(ev.target.result, { type:"array" });
-            const ws   = wb.Sheets[wb.SheetNames[0]];
-            const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
-            importFromRows(data, importCallbacks);
-            setImportMsg({ ok:true, msg:`Imported ${data.length} rows from ${file.name}.` });
-            showToast("Data imported ✓");
-            setImporting(false);
-            e.target.value = "";
-          }).catch(err => {
-            setImportMsg({ ok:false, msg:"Could not load XLSX library: " + err.message });
-            setImporting(false);
-          });
+          const XLSX = window.XLSX;
+          const wb   = XLSX.read(ev.target.result, { type:"array" });
+          const ws   = wb.Sheets[wb.SheetNames[0]];
+          const data = XLSX.utils.sheet_to_json(ws, { defval:"" });
+          importFromRows(data, importCallbacks);
+          setImportMsg({ ok:true, msg:`Imported ${data.length} rows from ${file.name}.` });
+          showToast("Data imported ✓");
+          setImporting(false);
+          e.target.value = "";
         } catch(err) {
           setImportMsg({ ok:false, msg:"Failed to parse XLSX: " + err.message });
           setImporting(false);
@@ -1224,28 +1225,37 @@ function SettingsScreen({ thresholds, thresholdMode,
                           setThresholds, setThresholdMode,
                           setDueThresholds, setInvestThresholds,
                           showToast }) {
-  const [tHi,  setTHi]  = useState(thresholds.hi);
-  const [tMid, setTMid] = useState(thresholds.mid);
-  const [tLo,  setTLo]  = useState(thresholds.lo);
-  const [tMode, setTMode] = useState(thresholdMode);
-  const [dGreen,  setDGreen]  = useState(dueThresholds.green);
-  const [dYellow, setDYellow] = useState(dueThresholds.yellow);
-  const [dRed,    setDRed]    = useState(dueThresholds.red);
-  const [iGreen,  setIGreen]  = useState(investThresholds.green);
-  const [iYellow, setIYellow] = useState(investThresholds.yellow);
-  const [iRed,    setIRed]    = useState(investThresholds.red);
+  const [tHi,  setTHi]  = useState(thresholds?.hi  ?? "60");
+  const [tMid, setTMid] = useState(thresholds?.mid ?? "30");
+  const [tLo,  setTLo]  = useState(thresholds?.lo  ?? "15");
+  const [tMode, setTMode] = useState(thresholdMode ?? "percent");
+  const [dGreen,  setDGreen]  = useState(dueThresholds?.green  ?? "14");
+  const [dYellow, setDYellow] = useState(dueThresholds?.yellow ?? "7");
+  const [dRed,    setDRed]    = useState(dueThresholds?.red    ?? "3");
+  const [iGreen,  setIGreen]  = useState(investThresholds?.green  ?? "75");
+  const [iYellow, setIYellow] = useState(investThresholds?.yellow ?? "40");
+  const [iRed,    setIRed]    = useState(investThresholds?.red    ?? "10");
 
   function handleSave() {
-    onSaveThresholds({ hi: tHi, mid: tMid, lo: tLo });
-    onSaveThresholdMode(tMode);
-    onSaveDueThresholds({ green: dGreen, yellow: dYellow, red: dRed });
-    onSaveInvestThresholds({ green: iGreen, yellow: iYellow, red: iRed });
+    onSaveThresholds?.({ hi: tHi, mid: tMid, lo: tLo });
+    onSaveThresholdMode?.(tMode);
+    onSaveDueThresholds?.({ green: dGreen, yellow: dYellow, red: dRed });
+    onSaveInvestThresholds?.({ green: iGreen, yellow: iYellow, red: iRed });
   }
 
   const unit = tMode === "percent" ? "%" : "$";
   const placeholder = tMode === "percent"
     ? ["e.g. 60", "e.g. 30", "e.g. 15"]
     : ["e.g. 2000", "e.g. 1000", "e.g. 500"];
+
+  if (!thresholds || !dueThresholds || !investThresholds) {
+    return (
+      <div className="screen">
+        <div className="screen-title">Settings</div>
+        <div style={{padding:24,color:"#4A6280",fontSize:14}}>Loading settings…</div>
+      </div>
+    );
+  }
 
   return (
     <div className="screen">
@@ -1358,9 +1368,9 @@ function SettingsScreen({ thresholds, thresholdMode,
 
       <div className="section-label">Data</div>
       <ExportImportPanel
-        exportArgs={[accounts, snapshots, bills, paycheck, billsOverride,
-                     roadmap, investments, thresholds, thresholdMode,
-                     dueThresholds, investThresholds]}
+        exportArgs={[accounts||[], snapshots||[], bills||[], paycheck||{}, billsOverride||null,
+                     roadmap||[], investments||[], thresholds||{}, thresholdMode||"percent",
+                     dueThresholds||{}, investThresholds||{}]}
         importCallbacks={{
           setAccounts:        v => { save("s2s_accounts",       v); setAccounts(v); },
           setSnapshots:       v => { save("s2s_snapshots",      v); setSnapshots(v); },
@@ -3329,7 +3339,7 @@ export default function App() {
           const ids=NAV.map(n=>n.id);
           const cur=ids.indexOf(tab);
         //  if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
-         // if(dx>0 && cur>0)            setTab(ids[cur-1]);
+        //  if(dx>0 && cur>0)            setTab(ids[cur-1]);
         }}>
         {toast && <div className="toast" key={toast}>{toast}</div>}
 
