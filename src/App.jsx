@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, Component } from "react";
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
@@ -205,7 +205,7 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const S2S_VERSION = "v1.3";
+const S2S_VERSION = "v1.4";
 
 function initStorage() {
   try {
@@ -1102,7 +1102,7 @@ function importFromRows(rows, callbacks) {
 function ExportImportPanel({ exportArgs, importCallbacks, showToast }) {
   const [importing, setImporting]   = useState(false);
   const [importMsg, setImportMsg]   = useState(null);
-  const fileRef = React.useRef();
+  const fileRef = useRef();
 
   function handleExport() {
     try {
@@ -3129,9 +3129,46 @@ function HoldingsTab({ accounts, snapshots, investments, latestBalance, investTh
 }
 
 
+// ─── Error Boundary ──────────────────────────────────────────────────────────
+class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error("Safe2Spend error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          background:"#0A1628", minHeight:"100vh", display:"flex",
+          flexDirection:"column", alignItems:"center", justifyContent:"center",
+          padding:32, fontFamily:"'DM Sans',sans-serif", color:"#E8EEF6"
+        }}>
+          <div style={{fontSize:32,marginBottom:16}}>⚠️</div>
+          <div style={{fontSize:18,fontWeight:600,marginBottom:8}}>Something went wrong</div>
+          <div style={{fontSize:13,color:"#4A6280",marginBottom:24,textAlign:"center",lineHeight:1.6}}>
+            {this.state.error?.message || "An unexpected error occurred"}
+          </div>
+          <button onClick={()=>window.location.reload()}
+            style={{background:"#00D4AA",color:"#0A1628",border:"none",borderRadius:10,
+              padding:"12px 24px",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            Reload App
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-export default function App() {
+function Safe2SpendApp() {
   const [tab, setTab]               = useState("spending");
   const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
   const [snapshots, setSnapshots]   = useState(() => load("s2s_snapshots",     DEFAULT_SNAPSHOTS));
@@ -3338,8 +3375,8 @@ export default function App() {
           if(Math.abs(dx)<50)return;
           const ids=NAV.map(n=>n.id);
           const cur=ids.indexOf(tab);
-          if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
-          if(dx>0 && cur>0)            setTab(ids[cur-1]);
+         // if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
+         // if(dx>0 && cur>0)            setTab(ids[cur-1]);
         }}>
         {toast && <div className="toast" key={toast}>{toast}</div>}
 
@@ -3424,5 +3461,13 @@ export default function App() {
         </nav>
       </div>
     </>
+  );
+}
+
+export default function App() {
+  return (
+    <ErrorBoundary>
+      <Safe2SpendApp />
+    </ErrorBoundary>
   );
 }
