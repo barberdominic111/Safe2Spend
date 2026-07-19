@@ -205,7 +205,7 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const S2S_VERSION = "v2.1";
+const S2S_VERSION = "v0.8";
 
 function initStorage() {
   try {
