@@ -320,7 +320,7 @@ const THEMES = {
 };
 
 function applyTheme(theme) {
-  const vars = THEMES[theme] || THEMES.dark;
+  const vars = THEMES[theme] || THEMES.warm;
   const root = document.documentElement;
   Object.entries(vars).forEach(([k,v]) => root.style.setProperty(k, v));
   root.setAttribute("data-theme", theme);
