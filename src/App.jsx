@@ -205,7 +205,7 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const S2S_VERSION = "v0.8";
+const S2S_VERSION = "v2.1";
 
 function initStorage() {
   try {
@@ -215,7 +215,7 @@ function initStorage() {
       localStorage.setItem("s2s_version", S2S_VERSION);
       if (savedTheme) localStorage.setItem("s2s_theme", savedTheme);
     }
-    applyTheme(localStorage.getItem("s2s_theme") || "dark");
+    applyTheme(localStorage.getItem("s2s_theme") || "light");
   } catch {}
 }
 initStorage();
