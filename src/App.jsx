@@ -745,8 +745,27 @@ const IconInvest = () => (
 );
 
 const IconHome = () => (
-  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M3 9.5L12 3l9 6.5V20a1 1 0 01-1 1H4a1 1 0 01-1-1V9.5z"/><path d="M9 21V12h6v9"/>
+  <svg
+    className="nav-icon"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    {/* Bottom coin */}
+    <ellipse cx="12" cy="17.5" rx="6" ry="1.8" />
+    <path d="M6 17.5 V15.5" />
+    <path d="M18 17.5 V15.5" />
+
+    {/* Middle coin */}
+    <ellipse cx="12" cy="13.5" rx="5" ry="1.5" />
+    <path d="M7 13.5 V12" />
+    <path d="M17 13.5 V12" />
+
+    {/* Top coin */}
+    <ellipse cx="12" cy="10" rx="4" ry="1.2" />
   </svg>
 );
 const IconHistory = () => (
