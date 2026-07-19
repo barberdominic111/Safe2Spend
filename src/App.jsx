@@ -3641,8 +3641,8 @@ function Safe2SpendApp() {
           if(Math.abs(dx)<50)return;
           const ids=NAV.map(n=>n.id);
           const cur=ids.indexOf(tab);
-          if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
-          if(dx>0 && cur>0)            setTab(ids[cur-1]);
+         // if(dx<0 && cur<ids.length-1) setTab(ids[cur+1]);
+         // if(dx>0 && cur>0)            setTab(ids[cur-1]);
         }}>
         {toast && <div className="toast" key={toast}>{toast}</div>}
 
