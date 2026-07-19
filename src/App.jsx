@@ -728,23 +728,19 @@ const IconAccounts = () => (
 );
 
 const IconInvest = () => (
-  <svg className="nav-icon" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round">
-    {/* pig body */}
-    <ellipse cx="11" cy="13" rx="7" ry="6" stroke="currentColor" strokeWidth="1.6"/>
-    {/* pig snout */}
-    <ellipse cx="8" cy="14.5" rx="2" ry="1.4" stroke="currentColor" strokeWidth="1.4"/>
-    <circle cx="7.3" cy="14.5" r="0.35" fill="currentColor"/>
-    <circle cx="8.7" cy="14.5" r="0.35" fill="currentColor"/>
-    {/* eye */}
-    <circle cx="13.5" cy="11" r="0.7" fill="currentColor"/>
-    {/* ear */}
-    <path d="M13 7.5 C13 7.5 13.5 5 15.5 5.5 C16 7 15 8.5 14 8.5" stroke="currentColor" strokeWidth="1.4" fill="none"/>
-    {/* coin slot */}
-    <path d="M13 8 L13 9.5" stroke="currentColor" strokeWidth="1.6"/>
-    {/* tail */}
-    <path d="M18 12 C19.5 11.5 20 12.5 19.5 13.5 C19 14.5 18 14 18 14" stroke="currentColor" strokeWidth="1.4" fill="none"/>
-    {/* legs */}
-    <path d="M7 19 L7 21 M10 19.5 L10 21.5 M14 19.5 L14 21.5 M17 19 L17 21" stroke="currentColor" strokeWidth="1.6"/>
+  <svg
+    className="nav-icon"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+  >
+    <path d="M4 20 H20" />
+    <path d="M4 20 V4" />
+    <path d="M6 16 L11 12 L15 13 L19 7" />
+    <path d="M17 7 H19 V9" />
   </svg>
 );
 
