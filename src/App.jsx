@@ -3427,7 +3427,7 @@ class ErrorBoundary extends Component {
 function Safe2SpendApp() {
   const [tab, setTab]               = useState("spending");
   const [theme, setTheme]           = useState(() => {
-    const t = localStorage.getItem("s2s_theme") || "dark";
+    const t = localStorage.getItem("s2s_theme") || "warm";
     return t;
   });
   const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
