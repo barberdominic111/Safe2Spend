@@ -215,7 +215,7 @@ function initStorage() {
       localStorage.setItem("s2s_version", S2S_VERSION);
       if (savedTheme) localStorage.setItem("s2s_theme", savedTheme);
     }
-    applyTheme(localStorage.getItem("s2s_theme") || "dark");
+    applyTheme(localStorage.getItem("s2s_theme") || "warm");
   } catch {}
 }
 initStorage();
