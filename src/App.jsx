@@ -754,18 +754,17 @@ const IconHome = () => (
     strokeLinecap="round"
     strokeLinejoin="round"
   >
-    {/* Bottom coin */}
-    <ellipse cx="12" cy="17.5" rx="6" ry="1.8" />
-    <path d="M6 17.5 V15.5" />
-    <path d="M18 17.5 V15.5" />
+    {/* Card outline */}
+    <rect x="3.5" y="6" width="17" height="12" rx="2" />
 
-    {/* Middle coin */}
-    <ellipse cx="12" cy="13.5" rx="5" ry="1.5" />
-    <path d="M7 13.5 V12" />
-    <path d="M17 13.5 V12" />
+    {/* Magnetic stripe */}
+    <path d="M3.5 10 H20.5" />
 
-    {/* Top coin */}
-    <ellipse cx="12" cy="10" rx="4" ry="1.2" />
+    {/* Chip */}
+    <rect x="6.5" y="12.2" width="3" height="2.4" rx=".4" />
+
+    {/* Card number */}
+    <path d="M12 14.5 H17" />
   </svg>
 );
 const IconHistory = () => (
