@@ -215,7 +215,7 @@ function initStorage() {
       localStorage.setItem("s2s_version", S2S_VERSION);
       if (savedTheme) localStorage.setItem("s2s_theme", savedTheme);
     }
-    applyTheme(localStorage.getItem("s2s_theme") || "warm");
+    applyTheme(localStorage.getItem("s2s_theme") || "dark");
   } catch {}
 }
 initStorage();
@@ -320,7 +320,7 @@ const THEMES = {
 };
 
 function applyTheme(theme) {
-  const vars = THEMES[theme] || THEMES.warm;
+  const vars = THEMES[theme] || THEMES.dark;
   const root = document.documentElement;
   Object.entries(vars).forEach(([k,v]) => root.style.setProperty(k, v));
   root.setAttribute("data-theme", theme);
@@ -3427,7 +3427,7 @@ class ErrorBoundary extends Component {
 function Safe2SpendApp() {
   const [tab, setTab]               = useState("spending");
   const [theme, setTheme]           = useState(() => {
-    const t = localStorage.getItem("s2s_theme") || "warm";
+    const t = localStorage.getItem("s2s_theme") || "dark";
     return t;
   });
   const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
