@@ -205,7 +205,7 @@ function dueColor(daysLeft, dt) {
 
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
-const S2S_VERSION = "v2.2";
+const S2S_VERSION = "v2.3";
 
 function initStorage() {
   try {
@@ -834,6 +834,338 @@ function RoleColors(role) {
   if (role === "credit_card")   return { bg:"#FFF5E6", color:"#FF9F0A" };
   if (role === "holding")       return { bg:"#F0F0F5", color:"var(--muted)" };
   return { bg:"var(--card2)", color:"var(--muted)" };
+}
+
+
+// ─── Custom Parse Rules Engine ────────────────────────────────────────────────
+
+function tokenizeText(text) {
+  return text.trim().split(/\s+/).map((token, index) => ({
+    index,
+    raw: token,
+    display: token.replace(/[^\w$.,*()]/g, "") || token,
+    isCurrency: /\$[\d,]+\.?\d*/.test(token) || /[\d,]+\.\d{2}/.test(token),
+    is4Digits: /\d{4}/.test(token.replace(/\D/g,"")),
+    isWord: /^[a-zA-Z]{3,}/.test(token),
+  }));
+}
+
+function extractLast4(token) {
+  const digits = token.replace(/\D/g, "");
+  return digits.length >= 4 ? digits.slice(-4) : null;
+}
+
+function extractBalanceFromToken(token) {
+  const clean = token.replace(/[$,]/g, "");
+  const val = parseFloat(clean);
+  return isNaN(val) ? null : val;
+}
+
+function applyCustomRule(rule, text) {
+  try {
+    const tokens = tokenizeText(text);
+    if (rule.identifierType === "last4") {
+      const idTok = tokens[rule.identifierTokenIndex];
+      if (!idTok) return null;
+      const last4 = extractLast4(idTok.raw);
+      if (!last4) return null;
+      const balance = extractBalanceFromToken(tokens[rule.balanceTokenIndex]?.raw || "");
+      if (balance === null) return null;
+      return { type:"digits", accountLast4:last4, balance, label:rule.name };
+    } else if (rule.identifierType === "keyword") {
+      if (!text.toLowerCase().includes(rule.identifierValue.toLowerCase())) return null;
+      const balance = extractBalanceFromToken(tokens[rule.balanceTokenIndex]?.raw || "");
+      if (balance === null) return null;
+      return { type:"digits", accountLast4:rule.mappedLast4, balance, label:rule.name };
+    }
+  } catch { return null; }
+  return null;
+}
+
+function runCustomRules(text, customRules, priority) {
+  for (const rule of (customRules||[]).filter(r=>r.priority===priority)) {
+    const result = applyCustomRule(rule, text);
+    if (result) return result;
+  }
+  return null;
+}
+
+function detectBankName(text) {
+  const t = text.toLowerCase();
+  if (t.includes("chase"))         return "Chase";
+  if (t.includes("capital one"))   return "Capital One";
+  if (t.includes("pnc"))           return "PNC";
+  if (t.includes("citi"))          return "Citi";
+  if (t.includes("amex")||t.includes("american express")) return "Amex";
+  if (t.includes("bank of america")||t.includes("bofa"))  return "Bank of America";
+  if (t.includes("wells fargo"))   return "Wells Fargo";
+  if (t.includes("discover"))      return "Discover";
+  if (t.includes("ally"))          return "Ally";
+  if (t.includes("usaa"))          return "USAA";
+  if (t.includes("synchrony"))     return "Synchrony";
+  if (t.includes("barclays"))      return "Barclays";
+  return "";
+}
+
+// ─── Rule Builder Modal ───────────────────────────────────────────────────────
+
+function RuleBuilderModal({ accounts, onSave, onCancel }) {
+  const [step, setStep]           = useState("paste");
+  const [sampleText, setSample]   = useState("");
+  const [tokens, setTokens]       = useState([]);
+  const [idType, setIdType]       = useState(null);
+  const [idTokenIdx, setIdTokenIdx]   = useState(null);
+  const [balTokenIdx, setBalTokenIdx] = useState(null);
+  const [mappedLast4, setMappedLast4] = useState("");
+  const [ruleName, setRuleName]   = useState("");
+  const [priority, setPriority]   = useState("high");
+
+  function handlePaste() {
+    if (!sampleText.trim()) return;
+    setTokens(tokenizeText(sampleText));
+    setStep("identify");
+  }
+
+  function handleIdToken(idx) {
+    const tok = tokens[idx];
+    if (!tok) return;
+    setIdType(tok.is4Digits ? "last4" : "keyword");
+    setIdTokenIdx(idx);
+    setStep("balance");
+  }
+
+  function handleBalToken(idx) {
+    if (idx === idTokenIdx) return;
+    setBalTokenIdx(idx);
+    setRuleName(detectBankName(sampleText) || "");
+    setStep(idType === "keyword" ? "map" : "name");
+  }
+
+  function handleSave() {
+    if (!ruleName.trim()) return;
+    onSave({
+      id: Date.now(),
+      name: ruleName.trim(),
+      priority,
+      identifierType: idType,
+      identifierTokenIndex: idTokenIdx,
+      identifierValue: idType === "keyword"
+        ? tokens[idTokenIdx].raw.replace(/[^a-zA-Z0-9]/g,"") : null,
+      mappedLast4: idType === "keyword" ? mappedLast4 : null,
+      balanceTokenIndex: balTokenIdx,
+      sampleText,
+    });
+  }
+
+  const Tok = ({ tok, i, onTap }) => {
+    const isId  = i === idTokenIdx;
+    const isBal = i === balTokenIdx;
+    return (
+      <button onClick={()=>onTap(i)} style={{
+        display:"inline-block", margin:"3px 2px",
+        padding:"5px 10px", borderRadius:8,
+        border:`1.5px solid ${isId?"var(--accent)":isBal?"var(--positive)":"var(--border)"}`,
+        background: isId?"var(--accent)20":isBal?"var(--positive)20":"var(--input-bg)",
+        color: isId?"var(--accent)":isBal?"var(--positive)":"var(--text2)",
+        fontFamily:"inherit", fontSize:13, fontWeight:(isId||isBal)?700:400,
+        cursor:"pointer", transition:"all .1s",
+      }}>
+        {tok.display||tok.raw}
+      </button>
+    );
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e=>e.target===e.currentTarget&&onCancel()}>
+      <div className="modal">
+
+        {step === "paste" && <>
+          <div className="modal-title">New Parse Rule</div>
+          <p style={{fontSize:13,color:"var(--muted)",marginBottom:16,lineHeight:1.6}}>
+            Paste a sample balance text from your bank. You'll tap to identify the account and the balance amount.
+          </p>
+          <div className="form-group">
+            <label className="form-label">Sample Bank Text</label>
+            <textarea className="form-input" style={{minHeight:90,resize:"none"}}
+              placeholder="Paste your bank's text here…"
+              value={sampleText} onChange={e=>setSample(e.target.value)}/>
+          </div>
+          <button className="form-save-btn" onClick={handlePaste} disabled={!sampleText.trim()}>
+            Next — Identify Account
+          </button>
+          <button className="form-cancel-btn" onClick={onCancel}>Cancel</button>
+        </>}
+
+        {step === "identify" && <>
+          <div className="modal-title">Tap the Account ID</div>
+          <p style={{fontSize:13,color:"var(--muted)",marginBottom:12,lineHeight:1.6}}>
+            Tap the word or number that identifies <strong style={{color:"var(--text)"}}>which account</strong> this is —
+            last 4 digits, card name (e.g. "Sapphire"), or any unique word.
+          </p>
+          <div style={{background:"var(--card2)",borderRadius:12,padding:14,marginBottom:16,lineHeight:2.2}}>
+            {tokens.map((tok,i)=><Tok key={i} tok={tok} i={i} onTap={handleIdToken}/>)}
+          </div>
+          <button className="form-cancel-btn" onClick={()=>setStep("paste")}>← Back</button>
+        </>}
+
+        {step === "balance" && <>
+          <div className="modal-title">Tap the Balance</div>
+          <p style={{fontSize:13,color:"var(--muted)",marginBottom:12,lineHeight:1.6}}>
+            Now tap the <strong style={{color:"var(--text)"}}>dollar amount</strong>.
+          </p>
+          <div style={{background:"var(--card2)",borderRadius:12,padding:14,marginBottom:16,lineHeight:2.2}}>
+            {tokens.map((tok,i)=><Tok key={i} tok={tok} i={i} onTap={handleBalToken}/>)}
+          </div>
+          <div style={{display:"flex",gap:10,fontSize:12,color:"var(--muted)",marginBottom:8}}>
+            <span style={{color:"var(--accent)",fontWeight:600}}>Purple = account ID</span>
+            <span>·</span>
+            <span style={{color:"var(--positive)",fontWeight:600}}>Green = balance (tap to set)</span>
+          </div>
+          <button className="form-cancel-btn" onClick={()=>setStep("identify")}>← Back</button>
+        </>}
+
+        {step === "map" && <>
+          <div className="modal-title">Which Account?</div>
+          <p style={{fontSize:13,color:"var(--muted)",marginBottom:16,lineHeight:1.6}}>
+            When the app sees <strong style={{color:"var(--text)"}}>"{tokens[idTokenIdx]?.raw}"</strong>,
+            which account should it update?
+          </p>
+          <div className="form-group">
+            <label className="form-label">Map to Account</label>
+            <select className="form-select" value={mappedLast4} onChange={e=>setMappedLast4(e.target.value)}>
+              <option value="">Select account…</option>
+              {accounts.map(a=>(
+                <option key={a.last4} value={a.last4}>{a.label} (•{a.last4})</option>
+              ))}
+            </select>
+          </div>
+          <button className="form-save-btn" disabled={!mappedLast4} onClick={()=>setStep("name")}>
+            Next — Name the Rule
+          </button>
+          <button className="form-cancel-btn" onClick={()=>setStep("balance")}>← Back</button>
+        </>}
+
+        {step === "name" && <>
+          <div className="modal-title">Name Your Rule</div>
+          <div style={{background:"var(--card2)",borderRadius:12,padding:14,marginBottom:16}}>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:8,letterSpacing:"1px",textTransform:"uppercase"}}>Preview</div>
+            <div style={{lineHeight:2.2}}>
+              {tokens.map((tok,i)=>(
+                <span key={i} style={{
+                  display:"inline-block",margin:"2px",padding:"2px 8px",borderRadius:6,
+                  background:i===idTokenIdx?"var(--accent)20":i===balTokenIdx?"var(--positive)20":"transparent",
+                  color:i===idTokenIdx?"var(--accent)":i===balTokenIdx?"var(--positive)":"var(--text2)",
+                  fontWeight:(i===idTokenIdx||i===balTokenIdx)?700:400,fontSize:13,
+                }}>{tok.raw}</span>
+              ))}
+            </div>
+            <div style={{display:"flex",gap:20,marginTop:10,paddingTop:10,borderTop:"1px solid var(--border)"}}>
+              <div>
+                <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:2}}>Account</div>
+                <div style={{fontSize:13,fontWeight:600,color:"var(--accent)"}}>
+                  {idType==="last4"?`Last 4 from "${tokens[idTokenIdx]?.raw}"`:`"${tokens[idTokenIdx]?.raw}" → •${mappedLast4}`}
+                </div>
+              </div>
+              <div>
+                <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:2}}>Balance</div>
+                <div style={{fontSize:13,fontWeight:600,color:"var(--positive)"}}>{tokens[balTokenIdx]?.raw}</div>
+              </div>
+            </div>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Rule Name</label>
+            <input className="form-input" placeholder="e.g. Chase Sapphire"
+              value={ruleName} onChange={e=>setRuleName(e.target.value)}/>
+          </div>
+          <div className="form-group">
+            <label className="form-label">Priority</label>
+            <div style={{display:"flex",gap:8}}>
+              {[{v:"high",l:"High",sub:"Tried before built-in patterns"},{v:"low",l:"Low",sub:"Tried after built-in patterns"}].map(opt=>(
+                <button key={opt.v} onClick={()=>setPriority(opt.v)} style={{
+                  flex:1,padding:"10px 8px",borderRadius:10,border:"none",cursor:"pointer",
+                  fontFamily:"inherit",fontSize:13,fontWeight:600,textAlign:"center",
+                  background:priority===opt.v?"var(--accent)":"var(--muted3)",
+                  color:priority===opt.v?"#fff":"var(--muted)",transition:"all .15s",
+                }}>
+                  {opt.v==="high"?"⬆":"⬇"} {opt.l}
+                  <div style={{fontSize:10,opacity:0.75,fontWeight:400,marginTop:2}}>{opt.sub}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+          <button className="form-save-btn" disabled={!ruleName.trim()} onClick={handleSave}>
+            Save Rule
+          </button>
+          <button className="form-cancel-btn" onClick={()=>setStep(idType==="keyword"?"map":"balance")}>← Back</button>
+        </>}
+
+      </div>
+    </div>
+  );
+}
+
+// ─── Parse Rules Panel (shown in Settings) ────────────────────────────────────
+
+function ParseRulesPanel({ rules, accounts, onAdd, onDelete, onTogglePriority }) {
+  const [showBuilder, setShowBuilder] = useState(false);
+  return (
+    <div style={{margin:"0 16px 24px"}}>
+      {rules.length === 0 && (
+        <div style={{
+          background:"var(--card2)",border:"1px dashed var(--border2)",
+          borderRadius:14,padding:18,textAlign:"center",
+          color:"var(--muted)",fontSize:13,lineHeight:1.6,marginBottom:10
+        }}>
+          No custom rules yet.<br/>
+          Add one to teach the app your bank's text format.
+        </div>
+      )}
+      {rules.map(rule=>(
+        <div key={rule.id} style={{
+          background:"var(--card)",borderRadius:14,boxShadow:"var(--card-shadow)",
+          padding:"14px 16px",marginBottom:8,
+          display:"flex",justifyContent:"space-between",alignItems:"flex-start"
+        }}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:3}}>{rule.name}</div>
+            <div style={{fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
+              {rule.identifierType==="last4"
+                ?`Digits from token ${rule.identifierTokenIndex+1}`
+                :`Keyword "${rule.identifierValue}" → •${rule.mappedLast4}`}
+              {" · "}Balance from token {rule.balanceTokenIndex+1}
+            </div>
+            <button onClick={()=>onTogglePriority(rule.id)} style={{
+              marginTop:6,padding:"3px 10px",borderRadius:20,border:"none",
+              fontFamily:"inherit",fontSize:11,fontWeight:600,cursor:"pointer",
+              background:rule.priority==="high"?"var(--accent)20":"var(--muted3)",
+              color:rule.priority==="high"?"var(--accent)":"var(--muted)",
+            }}>
+              {rule.priority==="high"?"⬆ High priority":"⬇ Low priority"}
+            </button>
+          </div>
+          <button onClick={()=>onDelete(rule.id)} style={{
+            background:"#FF453A15",color:"#FF453A",border:"none",
+            borderRadius:8,padding:"5px 10px",fontFamily:"inherit",
+            fontSize:12,fontWeight:600,cursor:"pointer",marginLeft:10,flexShrink:0
+          }}>Remove</button>
+        </div>
+      ))}
+      <button onClick={()=>setShowBuilder(true)} style={{
+        width:"100%",padding:13,borderRadius:14,
+        border:"1.5px dashed var(--border2)",background:"transparent",
+        color:"var(--accent)",fontFamily:"inherit",fontSize:14,fontWeight:600,cursor:"pointer"
+      }}>
+        + Add Parse Rule
+      </button>
+      {showBuilder && (
+        <RuleBuilderModal
+          accounts={accounts}
+          onSave={rule=>{onAdd(rule);setShowBuilder(false);}}
+          onCancel={()=>setShowBuilder(false)}
+        />
+      )}
+    </div>
+  );
 }
 
 // ─── SpendingScreen (replaces HomeScreen) ────────────────────────────────────
@@ -1465,7 +1797,7 @@ function SettingsScreen({ thresholds, thresholdMode,
                           setBillsOverride, setRoadmap, setInvestments,
                           setThresholds, setThresholdMode,
                           setDueThresholds, setInvestThresholds,
-                          showToast, theme, onSetTheme }) {
+                          showToast, theme, onSetTheme, parseRules }) {
   const [tHi,  setTHi]  = useState(thresholds?.hi  ?? "60");
   const [tMid, setTMid] = useState(thresholds?.mid ?? "30");
   const [tLo,  setTLo]  = useState(thresholds?.lo  ?? "15");
@@ -1635,6 +1967,15 @@ function SettingsScreen({ thresholds, thresholdMode,
             })
         }
       </div>
+
+      <div className="section-label">Parse Rules</div>
+      <ParseRulesPanel
+        rules={parseRules}
+        accounts={accounts}
+        onAdd={rule=>setParseRulesP(prev=>[...prev,rule])}
+        onDelete={id=>setParseRulesP(prev=>prev.filter(r=>r.id!==id))}
+        onTogglePriority={id=>setParseRulesP(prev=>prev.map(r=>r.id===id?{...r,priority:r.priority==="high"?"low":"high"}:r))}
+      />
 
       <div className="section-label">Data</div>
       <ExportImportPanel
@@ -3458,6 +3799,7 @@ function Safe2SpendApp() {
     const [investments, setInvestments] = useState(() => load("s2s_investments", []));
   const [heroKey, setHeroKey]       = useState(0);
   const [smsText, setSmsText]       = useState("");
+  const [parseRules, setParseRules] = useState(() => load("s2s_parse_rules", []));
   const [smsResult, setSmsResult]   = useState(null);
   const [manualAcct, setManualAcct] = useState("");
   const [manualBal, setManualBal]   = useState("");
@@ -3473,6 +3815,7 @@ function Safe2SpendApp() {
   function setDueThresholdsP(v)    { const val = typeof v === "function" ? v(dueThresholds):v;    save("s2s_due_thr",    val); setDueThresholds(val);    }
   function setInvestThresholdsP(v) { const val = typeof v === "function" ? v(investThresholds):v; save("s2s_inv_thr",   val); setInvestThresholds(val); }
   function setBillsP(v)          { const val = typeof v === "function" ? v(bills):v;          save("s2s_bills",       val); setBills(val);         }
+  function setParseRulesP(v) { const val = typeof v==="function"?v(parseRules):v; save("s2s_parse_rules",val); setParseRules(val); }
   function setPaycheckP(v)          { const val = typeof v === "function" ? v(paycheck):v;       save("s2s_paycheck",       val); setPaycheck(val);         }
   function setBillsOverrideP(v)     { const val = typeof v === "function" ? v(billsOverride):v;  save("s2s_bills_override", val); setBillsOverride(val);    }
   function setRoadmapP(v)        { const val = typeof v === "function" ? v(roadmap):v;        save("s2s_roadmap",     val); setRoadmap(val);       }
@@ -3514,8 +3857,14 @@ function Safe2SpendApp() {
   }
 
   function handleParseSMS() {
-    const result = parseSMS(smsText.trim());
-    if (!result) { setSmsResult({ ok:false, msg:"Couldn't parse a balance. Check the format." }); return; }
+    const text = smsText.trim();
+    // High-priority custom rules first
+    let result = runCustomRules(text, parseRules, "high");
+    // Built-in patterns
+    if (!result) result = parseSMS(text);
+    // Low-priority custom rules last
+    if (!result) result = runCustomRules(text, parseRules, "low");
+    if (!result) { setSmsResult({ ok:false, msg:"Couldn't parse a balance. Check the format or add a custom rule in Settings." }); return; }
 
     if (result.type === "cardname") {
       // No digits found — ask user to pick which account this card maps to
@@ -3729,6 +4078,7 @@ function Safe2SpendApp() {
             setDueThresholds={setDueThresholdsP} setInvestThresholds={setInvestThresholdsP}
             showToast={showToast}
             theme={theme} onSetTheme={handleSetTheme}
+            parseRules={parseRules} accounts={accounts}
           />
         )}
 
