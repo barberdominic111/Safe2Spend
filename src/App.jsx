@@ -943,18 +943,25 @@ function RuleBuilderModal({ accounts, onSave, onCancel }) {
 
   function handleSave() {
     if (!ruleName.trim()) return;
-    onSave({
-      id: Date.now(),
-      name: ruleName.trim(),
-      priority,
-      identifierType: idType,
-      identifierTokenIndex: idTokenIdx,
-      identifierValue: idType === "keyword"
-        ? tokens[idTokenIdx].raw.replace(/[^a-zA-Z0-9]/g,"") : null,
-      mappedLast4: idType === "keyword" ? mappedLast4 : null,
-      balanceTokenIndex: balTokenIdx,
-      sampleText,
-    });
+    if (idTokenIdx === null || balTokenIdx === null) return;
+    try {
+      const identifierValue = idType === "keyword" && tokens[idTokenIdx]
+        ? tokens[idTokenIdx].raw.replace(/[^a-zA-Z0-9]/g,"")
+        : null;
+      onSave({
+        id: Date.now(),
+        name: ruleName.trim(),
+        priority,
+        identifierType: idType,
+        identifierTokenIndex: idTokenIdx,
+        identifierValue,
+        mappedLast4: idType === "keyword" ? mappedLast4 : null,
+        balanceTokenIndex: balTokenIdx,
+        sampleText,
+      });
+    } catch(e) {
+      console.error("Rule save error:", e);
+    }
   }
 
   const Tok = ({ tok, i, onTap }) => {
@@ -1047,6 +1054,11 @@ function RuleBuilderModal({ accounts, onSave, onCancel }) {
 
         {step === "name" && <>
           <div className="modal-title">Name Your Rule</div>
+          {(idTokenIdx === null || balTokenIdx === null) && (
+            <div style={{background:"#FF453A12",border:"1px solid #FF453A30",borderRadius:10,padding:"10px 14px",marginBottom:12,fontSize:13,color:"#FF453A"}}>
+              Go back and select both an account identifier and a balance amount.
+            </div>
+          )}
           <div style={{background:"var(--card2)",borderRadius:12,padding:14,marginBottom:16}}>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:8,letterSpacing:"1px",textTransform:"uppercase"}}>Preview</div>
             <div style={{lineHeight:2.2}}>
@@ -1093,7 +1105,7 @@ function RuleBuilderModal({ accounts, onSave, onCancel }) {
               ))}
             </div>
           </div>
-          <button className="form-save-btn" disabled={!ruleName.trim()} onClick={handleSave}>
+          <button className="form-save-btn" disabled={!ruleName.trim() || idTokenIdx === null || balTokenIdx === null} onClick={handleSave}>
             Save Rule
           </button>
           <button className="form-cancel-btn" onClick={()=>setStep(idType==="keyword"?"map":"balance")}>← Back</button>
