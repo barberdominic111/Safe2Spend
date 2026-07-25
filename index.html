@@ -1,6 +1,57 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!--
+  Paste this <script> as the FIRST thing inside <head>, before your CSS
+  <link>/<style> tags. It's a plain (non-module, non-defer, non-async)
+  script, so the browser runs it synchronously and blocks parsing/painting
+  until it finishes — meaning the correct theme is guaranteed to be in
+  place before anything is drawn on screen, on every load, regardless of
+  how long the rest of the JS bundle takes to fetch and run.
+
+  It duplicates the three THEMES objects from App.jsx on purpose — this
+  needs to run before your bundle loads, so it can't import from it.
+  If you ever add a 4th theme or change these colors, update it in both
+  places (here and in App.jsx's THEMES constant).
+-->
+<script>
+  (function () {
+    try {
+      var THEMES = {
+        dark: {
+          "--bg":"#0F172A","--bg2":"#111827","--card":"#1E293B","--card2":"#273449",
+          "--border":"#334155","--border2":"#475569","--text":"#F8FAFC","--text2":"#CBD5E1",
+          "--muted":"#94A3B8","--muted2":"#64748B","--muted3":"#475569","--input-bg":"#111827",
+          "--nav-bg":"#0F172A","--label-color":"#818CF8","--hero-sub":"#94A3B8","--accent":"#6366F1",
+          "--accent2":"#818CF8","--positive":"#34D399","--shadow":"rgba(0,0,0,0.35)",
+          "--card-shadow":"0 10px 25px rgba(0,0,0,.30)"
+        },
+        light: {
+          "--bg":"#F8FAFC","--bg2":"#EBEEF3","--card":"#FFFFFF","--card2":"#F4F7FA",
+          "--border":"#E2E8F0","--border2":"#CBD5E1","--text":"#0F172A","--text2":"#475569",
+          "--muted":"#64748B","--muted2":"#94A3B8","--muted3":"#CBD5E1","--input-bg":"#FFFFFF",
+          "--nav-bg":"#FFFFFF","--label-color":"#5E5CE6","--hero-sub":"#64748B","--accent":"#5E5CE6",
+          "--accent2":"#7B79FF","--positive":"#30D158","--shadow":"rgba(0,0,0,0.06)",
+          "--card-shadow":"0 8px 20px rgba(0,0,0,.08)"
+        },
+        warm: {
+          "--bg":"#FAF7F2","--bg2":"#F2EDE5","--card":"#FFFEFB","--card2":"#F5F0E8",
+          "--border":"#E7E0D5","--border2":"#D5C9B8","--text":"#2B2118","--text2":"#5B4A3A",
+          "--muted":"#7A6856","--muted2":"#9B8A79","--muted3":"#EDE5D8","--input-bg":"#FFFEFB",
+          "--nav-bg":"#FFFEFB","--label-color":"#6D5ACF","--hero-sub":"#7A6856","--accent":"#6D5ACF",
+          "--accent2":"#8B76E8","--positive":"#2DB96A","--shadow":"rgba(0,0,0,0.05)",
+          "--card-shadow":"0 8px 20px rgba(43,33,24,.08)"
+        }
+      };
+      var saved = localStorage.getItem("s2s_theme");
+      var theme = (saved === "dark" || saved === "light" || saved === "warm") ? saved : "warm";
+      var vars = THEMES[theme];
+      var root = document.documentElement;
+      for (var k in vars) root.style.setProperty(k, vars[k]);
+      root.setAttribute("data-theme", theme);
+    } catch (e) {}
+  })();
+</script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#0A1628" />
