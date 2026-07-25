@@ -1,6 +1,5 @@
 import { useState, useRef, Component } from "react";
 
-
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 function fmt(n) {
@@ -2618,9 +2617,9 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
   const { billsBanks, totalBillsBal, monthlyTotal } = computeBillsHealth(accounts, bills, latestBalance);
 
   // Local override for pay settings (pulls from planner as default)
- // const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
- // const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
-//  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
+  const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
+  const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
+  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
 
   // Float multiplier from bills_bank accounts (use first one found, default 1.5)
   const floatMult = billsBanks[0]?.floatMultiplier ?? 1.5;
@@ -2665,43 +2664,43 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
   }
 
   return (
-  //  <div style={{padding:"0 16px 20px"}}>
+    <div style={{padding:"0 16px 20px"}}>
 
-    //  {/* ── Pay settings override ── */}
-      //<div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:14,padding:16,marginBottom:20}}>
-        //<div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:12}}>
-          //Paycheck Settings
-        //</div>
-        //<div style={{display:"flex",gap:10,marginBottom:10}}>
-          //<div style={{flex:1}}>
-            //<div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Net Pay</div>
-            //<input className="text-input" style={{padding:"8px 12px",fontSize:14}}
-              //placeholder="e.g. 3200" type="number" inputMode="decimal"
-              //value={localNetPay}
-              //onChange={e=>setLocalNetPay(e.target.value)}
-              //onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
-          //</div>
-          //<div style={{flex:1}}>
-            //<div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Frequency</div>
-            //<select className="form-select" style={{padding:"8px 12px",fontSize:13}}
-              //value={localFreq}
-              //onChange={e=>{setLocalFreq(e.target.value);onSaveBillsOverride({netPay:localNetPay,frequency:e.target.value,nextPayDate:localNextPayDate});}}>
-              //{PAY_FREQS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
-            //</select>
-          //</div>
-        //</div>
-        //<div style={{marginBottom:10}}>
-          //<div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Next Payday</div>
-          //<input className="text-input" style={{padding:"8px 12px",fontSize:14}}
-            //type="date"
-            //value={localNextPayDate}
-            //onChange={e=>setLocalNextPayDate(e.target.value)}
-            //onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
-        //</div>
-        //<div style={{fontSize:11,color:"var(--muted2)"}}>
-          //Float × {floatMult} set in Accounts · Pulls from Planner by default. Set the date once — it auto-advances each cycle.
-        //</div>
-      //</div>
+      {/* ── Pay settings override ── */}
+      <div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:14,padding:16,marginBottom:20}}>
+        <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:12}}>
+          Paycheck Settings
+        </div>
+        <div style={{display:"flex",gap:10,marginBottom:10}}>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Net Pay</div>
+            <input className="text-input" style={{padding:"8px 12px",fontSize:14}}
+              placeholder="e.g. 3200" type="number" inputMode="decimal"
+              value={localNetPay}
+              onChange={e=>setLocalNetPay(e.target.value)}
+              onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
+          </div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Frequency</div>
+            <select className="form-select" style={{padding:"8px 12px",fontSize:13}}
+              value={localFreq}
+              onChange={e=>{setLocalFreq(e.target.value);onSaveBillsOverride({netPay:localNetPay,frequency:e.target.value,nextPayDate:localNextPayDate});}}>
+              {PAY_FREQS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
+            </select>
+          </div>
+        </div>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Next Payday</div>
+          <input className="text-input" style={{padding:"8px 12px",fontSize:14}}
+            type="date"
+            value={localNextPayDate}
+            onChange={e=>setLocalNextPayDate(e.target.value)}
+            onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
+        </div>
+        <div style={{fontSize:11,color:"var(--muted2)"}}>
+          Float × {floatMult} set in Accounts · Pulls from Planner by default. Set the date once — it auto-advances each cycle.
+        </div>
+      </div>
 
       {sim && <>
 
