@@ -1,3 +1,13 @@
+/*
+ * These are a FALLBACK ONLY — matching the "warm" theme so there's never a
+ * blank/unstyled flash if something renders before JS runs. The real theme
+ * is set by a blocking <script> in index.html's <head> (reads localStorage
+ * and applies the saved theme before first paint) and then kept in sync by
+ * App.jsx's applyTheme()/initStorage(). Do not rely on these values alone —
+ * update THEMES.warm in App.jsx (and the matching object in the index.html
+ * head script) if you ever change these colors, and update the two other
+ * theme objects in App.jsx too.
+ */
 html {
   --bg:          #FAF7F2;
   --bg2:         #F2EDE5;
