@@ -206,6 +206,7 @@ function dueColor(daysLeft, dt) {
 // ─── localStorage helpers ─────────────────────────────────────────────────────
 
 const S2S_VERSION = "v2.3";
+const VALID_THEMES = ["dark", "light", "warm"];
 
 function initStorage() {
   try {
@@ -215,7 +216,9 @@ function initStorage() {
       localStorage.setItem("s2s_version", S2S_VERSION);
       if (savedTheme) localStorage.setItem("s2s_theme", savedTheme);
     }
-    applyTheme(localStorage.getItem("s2s_theme") || "warm");
+    const stored = localStorage.getItem("s2s_theme");
+    const safeTheme = VALID_THEMES.includes(stored) ? stored : "warm";
+    applyTheme(safeTheme);
   } catch {}
 }
 initStorage();
@@ -3950,8 +3953,8 @@ class ErrorBoundary extends Component {
 function Safe2SpendApp() {
   const [tab, setTab]               = useState("spending");
   const [theme, setTheme]           = useState(() => {
-    const t = localStorage.getItem("s2s_theme") || "warm";
-    return t;
+    const t = localStorage.getItem("s2s_theme");
+    return VALID_THEMES.includes(t) ? t : "warm";
   });
   const [accounts, setAccounts]     = useState(() => load("s2s_accounts",      DEFAULT_ACCOUNTS));
   const [snapshots, setSnapshots]   = useState(() => load("s2s_snapshots",     DEFAULT_SNAPSHOTS));
