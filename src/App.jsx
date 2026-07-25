@@ -2617,9 +2617,9 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
   const { billsBanks, totalBillsBal, monthlyTotal } = computeBillsHealth(accounts, bills, latestBalance);
 
   // Local override for pay settings (pulls from planner as default)
-  const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
-  const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
-  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
+ // const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
+ // const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
+//  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
 
   // Float multiplier from bills_bank accounts (use first one found, default 1.5)
   const floatMult = billsBanks[0]?.floatMultiplier ?? 1.5;
