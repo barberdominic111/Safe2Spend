@@ -1405,7 +1405,7 @@ const CSV_HEADERS = [
   "balance","timestamp","source",
   "name","amount","frequency","myPct","theirPct","fundingAcct","paymentAcct",
   "creditCard","isFixed","isAutopay","isEF","isRetire","rewardMult","notes",
-  "netPay","status","completedAt",
+  "netPay","nextPayDate","status","completedAt",
   "current","goal","targetType","targetDate","targetAge",
   "hi","mid","lo","mode","threshType"
 ];
@@ -1467,14 +1467,15 @@ function buildExportRows(accounts, snapshots, bills, paycheck, billsOverride,
 
   // PAYCHECK
   rows.push({
-    Type:"PAYCHECK", netPay:paycheck?.netPay??"", frequency:paycheck?.frequency??""
+    Type:"PAYCHECK", netPay:paycheck?.netPay??"", frequency:paycheck?.frequency??"",
+    nextPayDate:paycheck?.nextPayDate??""
   });
 
   // BILLS_OVERRIDE (pay settings override on Bills tab)
   if (billsOverride) {
     rows.push({
       Type:"BILLS_OVERRIDE", netPay:billsOverride.netPay??"",
-      frequency:billsOverride.frequency??""
+      frequency:billsOverride.frequency??"", nextPayDate:billsOverride.nextPayDate??""
     });
   }
 
@@ -1631,13 +1632,13 @@ function importFromRows(rows, callbacks) {
   // PAYCHECK
   if (byType.PAYCHECK?.[0]) {
     const r = byType.PAYCHECK[0];
-    setPaycheck({ netPay: r.netPay?.trim() || "", frequency: r.frequency?.trim() || "biweekly" });
+    setPaycheck({ netPay: r.netPay?.trim() || "", frequency: r.frequency?.trim() || "biweekly", nextPayDate: r.nextPayDate?.trim() || "" });
   }
 
   // BILLS_OVERRIDE
   if (byType.BILLS_OVERRIDE?.[0]) {
     const r = byType.BILLS_OVERRIDE[0];
-    setBillsOverride({ netPay: r.netPay?.trim() || "", frequency: r.frequency?.trim() || "biweekly" });
+    setBillsOverride({ netPay: r.netPay?.trim() || "", frequency: r.frequency?.trim() || "biweekly", nextPayDate: r.nextPayDate?.trim() || "" });
   }
 
   // ROADMAP
@@ -2285,18 +2286,27 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
         </div>
 
         {/* Next paycheck */}
-        <div className="dash-row">
-          <div className="dash-card dash-half small">
-            <div className="dash-card-label">Next Paycheck</div>
-            <div className="dash-card-value">{fmtShort(netPay)}</div>
-            <div className="dash-card-sub">{freq}</div>
-          </div>
-          <div className="dash-card dash-half small">
-            <div className="dash-card-label">Reserved</div>
-            <div className="dash-card-value" style={{color:"#F5A623"}}>{fmtShort(totalReserve)}</div>
-            <div className="dash-card-sub">for bills</div>
-          </div>
-        </div>
+        {(() => {
+          const cycleLen = PAY_CYCLE_DAYS[billsOverride?.frequency ?? freq] || 14;
+          const resolvedPay = resolveNextPayDate(billsOverride?.nextPayDate ?? paycheck.nextPayDate, cycleLen);
+          const daysToPay = resolvedPay ? daysUntilDate(resolvedPay.toISOString().slice(0,10)) : null;
+          return (
+            <div className="dash-row">
+              <div className="dash-card dash-half small">
+                <div className="dash-card-label">Next Paycheck</div>
+                <div className="dash-card-value">{fmtShort(netPay)}</div>
+                <div className="dash-card-sub">
+                  {resolvedPay ? `${fmtDateShort(resolvedPay)}${daysToPay!==null?` · ${daysToPay}d`:""}` : freq}
+                </div>
+              </div>
+              <div className="dash-card dash-half small">
+                <div className="dash-card-label">Reserved</div>
+                <div className="dash-card-value" style={{color:"#F5A623"}}>{fmtShort(totalReserve)}</div>
+                <div className="dash-card-sub">for bills</div>
+              </div>
+            </div>
+          );
+        })()}
         {/* Trough insight card */}
         {(() => {
           const billsBanks = accounts.filter(a=>a.role==="bills_bank");
@@ -2308,32 +2318,40 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
             frequency: billsOverride?.frequency ?? freq,
             floatMult: billsBanks[0]?.floatMultiplier ?? 1.5,
             accounts,
+            nextPayDate: billsOverride?.nextPayDate ?? paycheck.nextPayDate,
           });
-          const troughCol = sim.troughLowest >= sim.warnThresh ? "#00D4AA"
-                          : sim.troughLowest >= 0 ? "#F5C842" : "#FF6B6B";
+          const verdictCol = sim.isSafeUntilPaycheck ? "#00D4AA" : "#FF6B6B";
           return (
-            <div className="dash-card" style={{borderColor: troughCol+"30"}}>
-              <div className="dash-card-label">Bills Account · Trough Forecast</div>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
-                <div>
-                  <div className="dash-card-value" style={{color:troughCol}}>{fmtShort(sim.troughLowest)}</div>
-                  <div className="dash-card-sub">lowest around {sim.troughDate}</div>
-                </div>
-                <div style={{textAlign:"right"}}>
-                  <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:600,color:"#F5A623"}}>
-                    −{fmtShort(sim.troughExposure)}
-                  </div>
-                  <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>trough depth · {sim.mult}× float</div>
+            <div className="dash-card" style={{borderColor: verdictCol+"30"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
+                <span style={{fontSize:14}}>{sim.isSafeUntilPaycheck ? "✅" : "⚠️"}</span>
+                <div className="dash-card-label" style={{marginBottom:0}}>
+                  {sim.isSafeUntilPaycheck ? "Bills Account · Safe until payday" : "Bills Account · At risk before payday"}
                 </div>
               </div>
-              {sim.troughLowest < 0 && (
-                <div style={{marginTop:8,fontSize:11,color:"#FF6B6B",padding:"6px 10px",background:"#FF6B6B10",borderRadius:6}}>
-                  Account would go negative — increase float or add funds
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginTop:8}}>
+                <div>
+                  <div style={{fontSize:11,color:"var(--muted)",marginBottom:2}}>Hits $0 (no deposits)</div>
+                  <div className="dash-card-value" style={{fontSize:22,color:sim.zeroCrossDate?"#FF6B6B":"var(--positive)"}}>
+                    {sim.zeroCrossDateStr || "Never"}
+                  </div>
                 </div>
-              )}
-              {sim.troughLowest >= 0 && sim.troughLowest < sim.warnThresh && (
-                <div style={{marginTop:8,fontSize:11,color:"#F5C842",padding:"6px 10px",background:"#F5C84210",borderRadius:6}}>
-                  Gets tight but stays positive. No room for surprises.
+                <div style={{textAlign:"right"}}>
+                  <div style={{fontSize:11,color:"var(--muted)",marginBottom:2}}>Next paycheck</div>
+                  <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:600,color:"var(--text)"}}>
+                    {sim.nextPaycheckDateStr || "Not set"}
+                  </div>
+                </div>
+              </div>
+              {sim.isSafeUntilPaycheck ? (
+                <div style={{marginTop:8,fontSize:11,color:"var(--positive)",padding:"6px 10px",background:"#00D4AA10",borderRadius:6}}>
+                  {sim.zeroCrossDate
+                    ? `Float lasts ${sim.daysToSpare}d past payday if nothing else comes in.`
+                    : `Float comfortably covers you — no deposit needed before payday.`}
+                </div>
+              ) : (
+                <div style={{marginTop:8,fontSize:11,color:"#FF6B6B",padding:"6px 10px",background:"#FF6B6B10",borderRadius:6}}>
+                  Runs dry {Math.abs(sim.daysToSpare)}d before payday — move money in or raise the float.
                 </div>
               )}
             </div>
@@ -2408,23 +2426,68 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
 // Runs a day-by-day simulation over the float window (floatMult × pay cycle).
 // Each day: subtract bills due that day, add paycheck if it lands that day.
 // Returns the full daily balance array, trough day, trough value,
-// and where today sits relative to the expected cycle position.
-//
-// Pay cadence anchors to "today" as the most recent payday
-// (or calculates the next payday from today).
+// the actual date the account would hit $0 with no further deposits,
+// the actual next payday date, and whether the float alone (no future
+// deposits) lasts until that payday.
 
 const PAY_DAYS_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
 const PAY_CYCLE_DAYS    = { weekly:7,  biweekly:14, semimonthly:15, monthly:30 };
 
-function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMult, accounts }) {
+// Date helpers for paycheck tracking
+function startOfToday() {
+  const d = new Date();
+  d.setHours(0,0,0,0);
+  return d;
+}
+
+function daysUntilDate(dateStr) {
+  if (!dateStr) return null;
+  const target = new Date(dateStr + "T00:00:00");
+  if (isNaN(target.getTime())) return null;
+  const today = startOfToday();
+  return Math.round((target - today) / (1000*60*60*24));
+}
+
+function fmtDateShort(date) {
+  if (!date) return null;
+  const d = typeof date === "string" ? new Date(date + "T00:00:00") : date;
+  if (isNaN(d.getTime())) return null;
+  return d.toLocaleDateString("en-US", { month:"short", day:"numeric" });
+}
+
+// Rolls a stored "next payday" forward (by whole pay cycles) until it's
+// today or later, so a date entered once stays accurate without upkeep.
+function resolveNextPayDate(nextPayDate, cycleLen) {
+  if (!nextPayDate) return null;
+  let d = new Date(nextPayDate + "T00:00:00");
+  if (isNaN(d.getTime())) return null;
+  const today = startOfToday();
+  if (d < today) {
+    const daysBehind = Math.ceil((today - d) / (1000*60*60*24));
+    const cyclesBehind = Math.ceil(daysBehind / cycleLen);
+    d.setDate(d.getDate() + cyclesBehind * cycleLen);
+  }
+  return d;
+}
+
+function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMult, accounts, nextPayDate }) {
   const freq       = frequency || "biweekly";
   const cycleLen   = PAY_CYCLE_DAYS[freq] || 14;
   const perYear    = PAY_DAYS_PER_YEAR[freq] || 26;
   const paycheckAmt = parseFloat(netPay) || 0;
   const mult       = parseFloat(floatMult) || 1.5;
 
-  // Simulation window = floatMult × one pay cycle, minimum 30 days
-  const windowDays = Math.max(30, Math.ceil(mult * cycleLen) + cycleLen);
+  // Resolve the actual next payday date (falls back to "one cycle from today"
+  // if the user hasn't set a specific date yet)
+  const resolvedPayDate = resolveNextPayDate(nextPayDate, cycleLen);
+  const today = startOfToday();
+  const firstPayOffset = resolvedPayDate
+    ? Math.round((resolvedPayDate - today) / (1000*60*60*24))
+    : cycleLen;
+
+  // Simulation window = floatMult × one pay cycle, minimum 30 days, and always
+  // long enough to include at least the next payday
+  const windowDays = Math.max(30, Math.ceil(mult * cycleLen) + cycleLen, firstPayOffset + cycleLen);
 
   // Build bill events: day-of-month → total amount due
   const FREQ_MAP = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
@@ -2439,40 +2502,45 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
     billEvents[day] = (billEvents[day] || 0) + monthly;
   });
 
-  // Paycheck lands every cycleLen days from today (day 0 = today)
-  // We assume today is shortly after a payday so day 0 balance = current balance
-  const today = new Date();
-  const todayDom = today.getDate(); // day of month today
-
-  // Simulate day by day
+  // Simulate day by day — one pass including future paychecks (for the trough
+  // and cycle timeline), and a parallel "no deposit" balance (for the runway /
+  // zero-crossing question: how long does the current balance alone last).
   let bal = totalBillsBal;
+  let noDepositBal = totalBillsBal;
   const days = [];
   let lowestBal  = bal;
   let lowestDay  = 0;
   let lowestDate = new Date(today);
+  let zeroCrossDay  = null;
+  let zeroCrossDate = null;
 
   for (let d = 0; d < windowDays; d++) {
     const simDate = new Date(today);
     simDate.setDate(today.getDate() + d);
     const dom = simDate.getDate(); // day of month for this simulated day
 
-    // Add paycheck on cycle boundaries (every cycleLen days after day 0)
-    // Day 0 = today (just received paycheck), next on day cycleLen, etc.
+    // Paycheck lands on the resolved payday, then every cycleLen days after
     let paycheckToday = 0;
-    if (d > 0 && d % cycleLen === 0 && paycheckAmt > 0) {
+    if (paycheckAmt > 0 && d === firstPayOffset) {
       paycheckToday = paycheckAmt;
-      bal += paycheckAmt;
+    } else if (paycheckAmt > 0 && d > firstPayOffset && (d - firstPayOffset) % cycleLen === 0) {
+      paycheckToday = paycheckAmt;
     }
+    if (paycheckToday) bal += paycheckToday;
 
-    // Subtract bills due today (by day of month)
+    // Subtract bills due today (by day of month) — both balances
     const billsDue = billEvents[dom] || 0;
-    if (billsDue > 0) bal -= billsDue;
+    if (billsDue > 0) {
+      bal -= billsDue;
+      noDepositBal -= billsDue;
+    }
 
     const dayEntry = {
       d,
       date: simDate,
       dateStr: simDate.toLocaleDateString("en-US", { month:"short", day:"numeric" }),
       bal: Math.round(bal * 100) / 100,
+      noDepositBal: Math.round(noDepositBal * 100) / 100,
       billsDue,
       paycheckToday,
       dom,
@@ -2483,6 +2551,10 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
       lowestBal  = bal;
       lowestDay  = d;
       lowestDate = simDate;
+    }
+    if (zeroCrossDay === null && noDepositBal <= 0) {
+      zeroCrossDay  = d;
+      zeroCrossDate = new Date(simDate);
     }
   }
 
@@ -2496,10 +2568,6 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
   const floatTarget       = billsPerPaycheck * mult * paychecksPerMonth; // = monthlyTotal * mult
 
   // "Where are you right now in the cycle"
-  // Expected balance at day 0 is totalBillsBal.
-  // The trough depth = totalBillsBal - lowestBal.
-  // How far into the trough today: if today's bal > lowestBal, we haven't hit it yet.
-  // Trough exposure = how much lower the balance WILL get before next paycheck.
   const troughExposure  = totalBillsBal - lowestBal; // how deep the trough is
   const troughLowest    = lowestBal;
   const troughDate      = lowestDate.toLocaleDateString("en-US", { month:"short", day:"numeric" });
@@ -2517,11 +2585,26 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
   const zoneColor = zone === "safe" ? "#00D4AA" : zone === "warning" ? "#F5C842" : "#FF6B6B";
   const zoneLabel = zone === "safe" ? "Covered" : zone === "warning" ? "Watch it" : "At risk";
 
+  // ── The real question: does the float alone last until the next paycheck? ──
+  // zeroCrossDay is null if the "no deposit" balance never hits $0 within the
+  // simulated window — meaning the float comfortably outlasts this payday.
+  const isSafeUntilPaycheck = zeroCrossDay === null || zeroCrossDay >= firstPayOffset;
+  const daysToSpare = zeroCrossDay === null ? null : zeroCrossDay - firstPayOffset;
+
   return {
     days, monthlyTotal, floatTarget, safeThresh, warnThresh, dangThresh,
     troughLowest, troughExposure, troughDate, lowestDay,
     zone, zoneColor, zoneLabel,
     billsPerPaycheck, paycheckAmt, freq, cycleLen, mult, windowDays,
+    // New: date-anchored runway info
+    nextPaycheckDate: resolvedPayDate,
+    nextPaycheckDateStr: fmtDateShort(resolvedPayDate),
+    daysUntilPaycheck: firstPayOffset,
+    zeroCrossDate,
+    zeroCrossDateStr: fmtDateShort(zeroCrossDate),
+    daysUntilZero: zeroCrossDay,
+    isSafeUntilPaycheck,
+    daysToSpare,
   };
 }
 
@@ -2533,6 +2616,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
   // Local override for pay settings (pulls from planner as default)
   const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
   const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
+  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
 
   // Float multiplier from bills_bank accounts (use first one found, default 1.5)
   const floatMult = billsBanks[0]?.floatMultiplier ?? 1.5;
@@ -2543,6 +2627,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
     frequency: localFreq,
     floatMult,
     accounts,
+    nextPayDate: localNextPayDate,
   }) : null;
 
   const PAY_FREQS = [
@@ -2590,23 +2675,72 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
               placeholder="e.g. 3200" type="number" inputMode="decimal"
               value={localNetPay}
               onChange={e=>setLocalNetPay(e.target.value)}
-              onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq})}/>
+              onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
           </div>
           <div style={{flex:1}}>
             <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Frequency</div>
             <select className="form-select" style={{padding:"8px 12px",fontSize:13}}
               value={localFreq}
-              onChange={e=>{setLocalFreq(e.target.value);onSaveBillsOverride({netPay:localNetPay,frequency:e.target.value});}}>
+              onChange={e=>{setLocalFreq(e.target.value);onSaveBillsOverride({netPay:localNetPay,frequency:e.target.value,nextPayDate:localNextPayDate});}}>
               {PAY_FREQS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
             </select>
           </div>
         </div>
+        <div style={{marginBottom:10}}>
+          <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Next Payday</div>
+          <input className="text-input" style={{padding:"8px 12px",fontSize:14}}
+            type="date"
+            value={localNextPayDate}
+            onChange={e=>setLocalNextPayDate(e.target.value)}
+            onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
+        </div>
         <div style={{fontSize:11,color:"var(--muted2)"}}>
-          Float × {floatMult} set in Accounts · Pulls from Planner by default
+          Float × {floatMult} set in Accounts · Pulls from Planner by default. Set the date once — it auto-advances each cycle.
         </div>
       </div>
 
       {sim && <>
+
+        {/* ── Runway verdict: does the float last until payday? ── */}
+        <div style={{
+          background: sim.isSafeUntilPaycheck ? "#00D4AA12" : "#FF6B6B12",
+          border:`1px solid ${sim.isSafeUntilPaycheck ? "#00D4AA40" : "#FF6B6B40"}`,
+          borderRadius:14, padding:16, marginBottom:16
+        }}>
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <span style={{fontSize:18}}>{sim.isSafeUntilPaycheck ? "✅" : "⚠️"}</span>
+            <div style={{fontSize:14,fontWeight:700,color:sim.isSafeUntilPaycheck?"#00D4AA":"#FF6B6B"}}>
+              {sim.isSafeUntilPaycheck ? "Safe until your next paycheck" : "At risk before your next paycheck"}
+            </div>
+          </div>
+          <div style={{display:"flex",justifyContent:"space-between",gap:12,marginBottom:8}}>
+            <div style={{flex:1}}>
+              <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:3}}>Next Paycheck</div>
+              <div style={{fontSize:15,fontWeight:600,color:"var(--text)"}}>
+                {sim.nextPaycheckDateStr || "Set a date above"}
+              </div>
+              {sim.daysUntilPaycheck !== null && <div style={{fontSize:11,color:"var(--muted)",marginTop:1}}>in {sim.daysUntilPaycheck}d</div>}
+            </div>
+            <div style={{flex:1,textAlign:"right"}}>
+              <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:3}}>Hits $0 (no deposits)</div>
+              <div style={{fontSize:15,fontWeight:600,color:sim.zeroCrossDate?"#FF6B6B":"var(--positive)"}}>
+                {sim.zeroCrossDateStr || "Never in window"}
+              </div>
+              {sim.daysUntilZero !== null && <div style={{fontSize:11,color:"var(--muted)",marginTop:1}}>in {sim.daysUntilZero}d</div>}
+            </div>
+          </div>
+          {sim.isSafeUntilPaycheck ? (
+            <div style={{padding:"8px 12px",background:"#00D4AA12",borderRadius:8,fontSize:12,color:"var(--positive)"}}>
+              {sim.zeroCrossDate
+                ? `If no more money came in, this account would run dry ${sim.daysToSpare}d after your paycheck lands — you're covered.`
+                : `At the current pace, this account won't hit $0 before your next paycheck arrives.`}
+            </div>
+          ) : (
+            <div style={{padding:"8px 12px",background:"#FF6B6B18",borderRadius:8,fontSize:12,color:"#FF6B6B"}}>
+              If no more money comes in, this account runs out on {sim.zeroCrossDateStr} — {Math.abs(sim.daysToSpare)}d before your {sim.nextPaycheckDateStr} paycheck. Move money in or raise the float.
+            </div>
+          )}
+        </div>
 
         {/* ── Trough warning card ── */}
         <div style={{
@@ -3029,6 +3163,7 @@ const FREQ_OPTIONS = [
 function PlannerScreen({ bills, paycheck, onSavePaycheck, embedded=false }) {
   const [netPay, setNetPay]     = useState(paycheck.netPay || "");
   const [freq,   setFreq]       = useState(paycheck.frequency || "biweekly");
+  const [nextPayDate, setNextPayDate] = useState(paycheck.nextPayDate || "");
 
   const FREQ_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
   const perYear = FREQ_PER_YEAR[freq] || 26;
@@ -3046,7 +3181,10 @@ function PlannerScreen({ bills, paycheck, onSavePaycheck, embedded=false }) {
   const totalReserve = lineItems.reduce((s,b) => s + b.reserve, 0);
   const remaining    = net - totalReserve;
 
-  function handleSave() { onSavePaycheck({ netPay, frequency: freq }); }
+  const resolvedNextPay = resolveNextPayDate(nextPayDate, PAY_CYCLE_DAYS[freq] || 14);
+  const daysToNextPay   = resolvedNextPay ? daysUntilDate(resolvedNextPay.toISOString().slice(0,10)) : null;
+
+  function handleSave() { onSavePaycheck({ netPay, frequency: freq, nextPayDate }); }
 
   return (
     <div className={embedded?"":"screen"}>
@@ -3064,11 +3202,28 @@ function PlannerScreen({ bills, paycheck, onSavePaycheck, embedded=false }) {
             {FREQ_OPTIONS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
           </select>
         </div>
+        <div className="form-group">
+          <label className="form-label">Next Payday</label>
+          <input className="form-input" type="date"
+            value={nextPayDate} onChange={e=>setNextPayDate(e.target.value)} onBlur={handleSave}/>
+          {resolvedNextPay && (
+            <div style={{fontSize:11,color:"var(--muted)",marginTop:6}}>
+              Next paycheck: <strong style={{color:"var(--text2)"}}>{fmtDateShort(resolvedNextPay)}</strong>
+              {daysToNextPay !== null && ` · in ${daysToNextPay}d`} · set once, auto-advances each cycle
+            </div>
+          )}
+        </div>
       </div>
 
       {net > 0 && (
         <>
           <div className="planner-hero">
+            {resolvedNextPay && (
+              <div className="planner-row">
+                <span className="planner-lbl">Next Paycheck</span>
+                <span className="planner-val" style={{fontSize:19}}>{fmtDateShort(resolvedNextPay)}{daysToNextPay!==null && ` · ${daysToNextPay}d`}</span>
+              </div>
+            )}
             <div className="planner-row">
               <span className="planner-lbl">Paycheck</span>
               <span className="planner-val">{fmt(net)}</span>
@@ -3806,7 +3961,7 @@ function Safe2SpendApp() {
   const [investThresholds, setInvestThresholds] = useState(() => load("s2s_inv_thr",   DEFAULT_INVEST_THRESHOLDS));
 
   const [bills,       setBills]       = useState(() => load("s2s_bills",       []));
-  const [paycheck,    setPaycheck]    = useState(() => load("s2s_paycheck",    { netPay:"", frequency:"biweekly" }));
+  const [paycheck,    setPaycheck]    = useState(() => load("s2s_paycheck",    { netPay:"", frequency:"biweekly", nextPayDate:"" }));
   const [billsOverride, setBillsOverride] = useState(() => load("s2s_bills_override", null));
   const [roadmap,     setRoadmap]     = useState(() => load("s2s_roadmap",     DEFAULT_ROADMAP));
     const [investments, setInvestments] = useState(() => load("s2s_investments", []));
