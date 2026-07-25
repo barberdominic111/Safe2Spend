@@ -61,8 +61,8 @@ const CARD_NAME_PATTERNS = [
 ];
 
 // Returns:
-//   { type: "digits",   accountLast4, balance, label }   — known account, save immediately
-//   { type: "cardname", cardName,     balance, label }   — no digits, needs account confirmation
+//   { type: "digits", accountLast4, balance, label } — known account, save immediately
+//   { type: "cardname", cardName, balance, label } — no digits, needs account confirmation
 //   null — unrecognised
 function parseSMS(text) {
   // Try digit-bearing patterns first
@@ -1809,7 +1809,8 @@ function SettingsScreen({ thresholds, thresholdMode,
                           setBillsOverride, setRoadmap, setInvestments,
                           setThresholds, setThresholdMode,
                           setDueThresholds, setInvestThresholds,
-                          showToast, theme, onSetTheme, parseRules }) {
+                          showToast, theme, onSetTheme, parseRules,
+                          onAddParseRule, onDeleteParseRule, onToggleParseRulePriority }) {
   const [tHi,  setTHi]  = useState(thresholds?.hi  ?? "60");
   const [tMid, setTMid] = useState(thresholds?.mid ?? "30");
   const [tLo,  setTLo]  = useState(thresholds?.lo  ?? "15");
@@ -1984,9 +1985,9 @@ function SettingsScreen({ thresholds, thresholdMode,
       <ParseRulesPanel
         rules={parseRules}
         accounts={accounts}
-        onAdd={rule=>setParseRulesP(prev=>[...prev,rule])}
-        onDelete={id=>setParseRulesP(prev=>prev.filter(r=>r.id!==id))}
-        onTogglePriority={id=>setParseRulesP(prev=>prev.map(r=>r.id===id?{...r,priority:r.priority==="high"?"low":"high"}:r))}
+        onAdd={onAddParseRule}
+        onDelete={onDeleteParseRule}
+        onTogglePriority={onToggleParseRulePriority}
       />
 
       <div className="section-label">Data</div>
@@ -3996,6 +3997,13 @@ function Safe2SpendApp() {
   function handleEditInvest(v)   { setInvestmentsP(prev => prev.map(x => x.id === v.id ? v : x)); showToast("Goal updated"); }
   function handleDeleteInvest(id){ setInvestmentsP(prev => prev.filter(x => x.id !== id)); showToast("Goal removed"); }
 
+  // ── Parse rule handlers ────────────────────────────────────────────────────
+  function handleAddParseRule(rule) { setParseRulesP(prev => [...prev, rule]); showToast("Parse rule added"); }
+  function handleDeleteParseRule(id) { setParseRulesP(prev => prev.filter(r => r.id !== id)); showToast("Parse rule removed"); }
+  function handleToggleParseRulePriority(id) {
+    setParseRulesP(prev => prev.map(r => r.id === id ? { ...r, priority: r.priority === "high" ? "low" : "high" } : r));
+  }
+
   const NAV = [
     { id:"dashboard", label:"Dashboard",Icon:IconDashboard },
     { id:"spending",  label:"Spending", Icon:IconHome      },
@@ -4090,7 +4098,10 @@ function Safe2SpendApp() {
             setDueThresholds={setDueThresholdsP} setInvestThresholds={setInvestThresholdsP}
             showToast={showToast}
             theme={theme} onSetTheme={handleSetTheme}
-            parseRules={parseRules} accounts={accounts}
+            parseRules={parseRules}
+            onAddParseRule={handleAddParseRule}
+            onDeleteParseRule={handleDeleteParseRule}
+            onToggleParseRulePriority={handleToggleParseRulePriority}
           />
         )}
 
