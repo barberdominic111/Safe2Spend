@@ -2505,9 +2505,22 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
     billEvents[day] = (billEvents[day] || 0) + monthly;
   });
 
-  // Simulate day by day — one pass including future paychecks (for the trough
-  // and cycle timeline), and a parallel "no deposit" balance (for the runway /
-  // zero-crossing question: how long does the current balance alone last).
+  // Monthly bill total, and — the key assumption for this model — the amount
+  // that gets set aside from EACH paycheck for bills. This is deliberately
+  // NOT the whole paycheck: once bills are set up, we assume only the bills'
+  // pro-rated share moves into this account each cycle (a sinking-fund
+  // transfer), regardless of total take-home pay. Over a year this deposits
+  // exactly as much as gets billed — verified: 26 biweekly deposits of
+  // monthlyTotal/(26/12) sum to monthlyTotal × 12.
+  const monthlyTotal = Object.values(billEvents).reduce((s,v)=>s+v,0);
+  const paychecksPerMonth = perYear / 12;
+  const billsPerPaycheck  = paychecksPerMonth > 0 ? monthlyTotal / paychecksPerMonth : 0;
+  const floatTarget       = monthlyTotal * mult;
+
+  // Simulate day by day — one pass including future bills-share deposits (for
+  // the trough and cycle timeline), and a parallel "no deposit" balance (for
+  // the runway / zero-crossing question: how long does the current balance
+  // alone last with no more transfers at all).
   let bal = totalBillsBal;
   let noDepositBal = totalBillsBal;
   const days = [];
@@ -2522,12 +2535,13 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
     simDate.setDate(today.getDate() + d);
     const dom = simDate.getDate(); // day of month for this simulated day
 
-    // Paycheck lands on the resolved payday, then every cycleLen days after
+    // The bills' share lands on the resolved payday, then every cycleLen days
+    // after — not the full paycheck amount
     let paycheckToday = 0;
-    if (paycheckAmt > 0 && d === firstPayOffset) {
-      paycheckToday = paycheckAmt;
-    } else if (paycheckAmt > 0 && d > firstPayOffset && (d - firstPayOffset) % cycleLen === 0) {
-      paycheckToday = paycheckAmt;
+    if (billsPerPaycheck > 0 && d === firstPayOffset) {
+      paycheckToday = billsPerPaycheck;
+    } else if (billsPerPaycheck > 0 && d > firstPayOffset && (d - firstPayOffset) % cycleLen === 0) {
+      paycheckToday = billsPerPaycheck;
     }
     if (paycheckToday) bal += paycheckToday;
 
@@ -2561,20 +2575,10 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
     }
   }
 
-  // Monthly bill total (for zone lines)
-  const monthlyTotal = Object.values(billEvents).reduce((s,v)=>s+v,0);
-
-  // Float target = (monthly bills / paychecks per month) × paychecks in float window
-  // Simplified: monthly × mult (same dollar amount, different meaning)
-  const paychecksPerMonth = perYear / 12;
-  const billsPerPaycheck  = monthlyTotal / paychecksPerMonth;
-  const floatTarget       = billsPerPaycheck * mult * paychecksPerMonth; // = monthlyTotal * mult
-
   // "Where are you right now in the cycle"
   const troughExposure  = totalBillsBal - lowestBal; // how deep the trough is
   const troughLowest    = lowestBal;
   const troughDate      = lowestDate.toLocaleDateString("en-US", { month:"short", day:"numeric" });
-  const cycleBillsTotal = billsPerPaycheck * mult; // bills expected in the float window
 
   // Zone thresholds (in dollar terms)
   const safeThresh = floatTarget;           // above this = safe (full float covered)
@@ -2835,7 +2839,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
           <TroughSawtoothChart days={sim.days} safeThresh={sim.safeThresh} warnThresh={sim.warnThresh}
             mult={sim.mult} troughDay={sim.lowestDay}/>
           <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:10,paddingLeft:4,fontSize:10,color:"var(--muted)"}}>
-            <span><span style={{color:"#00D4AA"}}>┊</span> Paycheck lands</span>
+            <span><span style={{color:"#00D4AA"}}>┊</span> Bills transfer lands</span>
             <span><span style={{color:"#FF9F0A"}}>●</span> Bill paid</span>
             <span><span style={{color:"#FF6B6B"}}>●</span> Trough — {fmt(sim.troughLowest)} on {sim.troughDate}</span>
           </div>
@@ -2914,7 +2918,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
                   </div>
                   {paycheckDay && (
                     <div style={{fontSize:11,color:"var(--positive)",marginTop:2}}>
-                      +{fmt(sim.paycheckAmt)} paycheck on {paycheckDay.dateStr}
+                      +{fmt(sim.billsPerPaycheck)} set aside for bills on {paycheckDay.dateStr}
                     </div>
                   )}
                 </div>
