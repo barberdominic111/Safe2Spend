@@ -2214,16 +2214,8 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
 
   // Projected safe to spend from paycheck planner
   const freq = paycheck.frequency || "biweekly";
-  const FREQ_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
-  const perYear = FREQ_PER_YEAR[freq] || 26;
   const netPay = parseFloat(paycheck.netPay) || 0;
-  function reservePerPaycheck(bill) {
-    const BILL_FREQ = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
-    const myPct = parseFloat(bill.myPct) || 100;
-    const annual = (parseFloat(bill.amount) || 0) * (BILL_FREQ[bill.frequency] || 12) * (myPct / 100);
-    return annual / perYear;
-  }
-  const totalReserve = bills.reduce((s, b) => s + reservePerPaycheck(b), 0);
+  const totalReserve = computeReservePerPaycheck(bills, freq);
   const projectedSafe = netPay - totalReserve;
 
   // Current roadmap step
@@ -2310,7 +2302,7 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
             </div>
           );
         })()}
-        {/* Trough insight card */}
+        {/* Lowest point insight card */}
         {(() => {
           const billsBanks = accounts.filter(a=>a.role==="bills_bank");
           const totalBillsBal = billsBanks.reduce((s,a)=>s+(latestBalance(a.last4)??0),0);
@@ -2424,6 +2416,50 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
 
 // ─── BillsScreen ──────────────────────────────────────────────────────────────
 
+// Reserve-per-paycheck for a single bill — the one formula used everywhere
+// a bill's per-cycle share is needed (Planner's breakdown list, and the
+// totals below).
+function billReservePerPaycheck(bill, payFrequency) {
+  const paychecksPerYear = PAY_DAYS_PER_YEAR[payFrequency] || 26;
+  const myPct = parseFloat(bill.myPct) || 100;
+  const annual = (parseFloat(bill.amount) || 0) * (FREQ_PER_YEAR_MAP[bill.frequency] || 12) * (myPct / 100);
+  return annual / paychecksPerYear;
+}
+
+// Reserve-per-paycheck: the amount set aside from EACH paycheck for bills.
+// This is the single source of truth for that figure — both the Planner tab
+// and the Scale tab call this exact function, so the two screens can never
+// show different numbers for the same thing.
+function computeReservePerPaycheck(bills, payFrequency) {
+  return bills.reduce((sum, b) => sum + billReservePerPaycheck(b, payFrequency), 0);
+}
+
+// The largest sum of bills that could ever land inside a single pay-cycle
+// window, regardless of which day that cycle happens to start on. This is
+// the true "minimum balance required" — the amount you'd need sitting in
+// the account the moment before your worst possible cycle, to survive to
+// the next deposit. Computed by sliding a cycleLen-day window across a
+// generic ~13-month calendar (so real month lengths are respected) and
+// taking the max.
+function computeWorstCycleBillTotal(billEvents, cycleLen, spanDays = 400) {
+  if (cycleLen <= 0) return 0;
+  const anchor = new Date(2001, 0, 1); // arbitrary; just needs real month-length rollover
+  const dueAmounts = [];
+  for (let i = 0; i < spanDays; i++) {
+    const d = new Date(anchor);
+    d.setDate(anchor.getDate() + i);
+    dueAmounts.push(billEvents[d.getDate()] || 0);
+  }
+  let windowSum = 0;
+  for (let i = 0; i < cycleLen && i < spanDays; i++) windowSum += dueAmounts[i];
+  let best = windowSum;
+  for (let start = 1; start <= spanDays - cycleLen; start++) {
+    windowSum += dueAmounts[start + cycleLen - 1] - dueAmounts[start - 1];
+    if (windowSum > best) best = windowSum;
+  }
+  return best;
+}
+
 // ─── Trough Simulation Engine ─────────────────────────────────────────────────
 //
 // Runs a day-by-day simulation over the float window (floatMult × pay cycle).
@@ -2476,9 +2512,12 @@ function resolveNextPayDate(nextPayDate, cycleLen) {
 function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMult, accounts, nextPayDate }) {
   const freq       = frequency || "biweekly";
   const cycleLen   = PAY_CYCLE_DAYS[freq] || 14;
-  const perYear    = PAY_DAYS_PER_YEAR[freq] || 26;
   const paycheckAmt = parseFloat(netPay) || 0;
-  const mult       = parseFloat(floatMult) || 1.5;
+  // mult is expressed in "cycles of cushion": 1.0 = exactly enough to survive
+  // your single worst pay cycle with nothing to spare, 2.0 = two full worst
+  // cycles held in reserve, etc. It can never go below 1 — anything less
+  // guarantees you can't survive your worst cycle.
+  const mult = Math.max(1, parseFloat(floatMult) || 1.5);
 
   // Resolve the actual next payday date (falls back to "one cycle from today"
   // if the user hasn't set a specific date yet)
@@ -2505,17 +2544,21 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
     billEvents[day] = (billEvents[day] || 0) + monthly;
   });
 
-  // Monthly bill total, and — the key assumption for this model — the amount
-  // that gets set aside from EACH paycheck for bills. This is deliberately
-  // NOT the whole paycheck: once bills are set up, we assume only the bills'
-  // pro-rated share moves into this account each cycle (a sinking-fund
-  // transfer), regardless of total take-home pay. Over a year this deposits
-  // exactly as much as gets billed — verified: 26 biweekly deposits of
-  // monthlyTotal/(26/12) sum to monthlyTotal × 12.
   const monthlyTotal = Object.values(billEvents).reduce((s,v)=>s+v,0);
-  const paychecksPerMonth = perYear / 12;
-  const billsPerPaycheck  = paychecksPerMonth > 0 ? monthlyTotal / paychecksPerMonth : 0;
-  const floatTarget       = monthlyTotal * mult;
+
+  // The amount set aside from EACH paycheck for bills — deliberately NOT the
+  // whole paycheck. Once bills are set up, we assume only the bills' pro-rated
+  // share moves into this account each cycle (a sinking-fund transfer),
+  // regardless of total take-home pay. Uses the exact same formula as the
+  // Planner tab's "Reserved for bills" figure — guaranteed to match.
+  const billsPerPaycheck = computeReservePerPaycheck(bills, freq);
+
+  // Minimum Balance Required: the true worst-case amount of bills that could
+  // land inside any single pay cycle. This is the hard floor — the least you
+  // can carry in this account and still be guaranteed to survive your worst
+  // cycle before the next paycheck. The float multiplier scales up from here.
+  const minBalanceRequired = computeWorstCycleBillTotal(billEvents, cycleLen);
+  const floatTarget = minBalanceRequired * mult;
 
   // Simulate day by day — one pass including future bills-share deposits (for
   // the trough and cycle timeline), and a parallel "no deposit" balance (for
@@ -2576,14 +2619,15 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
   }
 
   // "Where are you right now in the cycle"
-  const troughExposure  = totalBillsBal - lowestBal; // how deep the trough is
+  const troughExposure  = totalBillsBal - lowestBal; // how deep the lowest point is
   const troughLowest    = lowestBal;
   const troughDate      = lowestDate.toLocaleDateString("en-US", { month:"short", day:"numeric" });
 
-  // Zone thresholds (in dollar terms)
-  const safeThresh = floatTarget;           // above this = safe (full float covered)
-  const warnThresh = monthlyTotal;          // above monthly but below float = watch
-  const dangThresh = monthlyTotal * 0.5;   // below half monthly = danger
+  // Zone thresholds (in dollar terms), now anchored to the true minimum
+  // required rather than an average monthly figure
+  const safeThresh = floatTarget;           // above this = fully covered with your chosen cushion
+  const warnThresh = minBalanceRequired;    // above this = meets the bare minimum, no extra cushion
+  const dangThresh = minBalanceRequired * 0.5;
 
   // Current zone
   const zone = totalBillsBal >= safeThresh ? "safe"
@@ -2599,7 +2643,7 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
   const daysToSpare = zeroCrossDay === null ? null : zeroCrossDay - firstPayOffset;
 
   return {
-    days, monthlyTotal, floatTarget, safeThresh, warnThresh, dangThresh,
+    days, monthlyTotal, minBalanceRequired, floatTarget, safeThresh, warnThresh, dangThresh,
     troughLowest, troughExposure, troughDate, lowestDay,
     zone, zoneColor, zoneLabel,
     billsPerPaycheck, paycheckAmt, freq, cycleLen, mult, windowDays,
@@ -2629,7 +2673,7 @@ function zoneColorFor(v, safeThresh, warnThresh) {
   return "#FF6B6B";
 }
 
-function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) {
+function TroughSawtoothChart({ days, safeThresh, warnThresh, minBalanceRequired, mult, troughDay }) {
   const W = 600, H = 210;
   const marginLeft = 46, marginRight = 10, marginTop = 18, marginBottom = 8;
   const plotW = W - marginLeft - marginRight;
@@ -2666,19 +2710,31 @@ function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) 
     days.map((d, i) => `L${xAt(i)},${yAt(d.bal)}`).join(" ") +
     ` L${xAt(days.length - 1)},${yAt(yMin)} Z`;
 
-  const trough = days[troughDay] ?? days.reduce((a, b) => (b.bal < a.bal ? b : a), days[0]);
+  const lowestPoint = days[troughDay] ?? days.reduce((a, b) => (b.bal < a.bal ? b : a), days[0]);
+  const showBothLines = Math.abs(safeThresh - minBalanceRequired) > 1; // avoid overlapping labels when mult===1
 
   return (
     <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", overflow: "visible" }}>
       {/* area under the curve */}
       <path d={areaPath} fill="var(--accent)" opacity="0.08" />
 
-      {/* safety stock reference line */}
+      {/* safety stock target line (minBalanceRequired × mult) */}
       <line x1={marginLeft} x2={W - marginRight} y1={yAt(safeThresh)} y2={yAt(safeThresh)}
         stroke="#00D4AA" strokeWidth="1.5" strokeDasharray="4 3" opacity="0.65" />
       <text x={W - marginRight} y={yAt(safeThresh) - 5} textAnchor="end" fontSize="9" fill="#00D4AA" opacity="0.9">
-        Safety stock ({mult}×)
+        Your cushion target ({mult.toFixed(1)} cycles)
       </text>
+
+      {/* minimum balance required line (the hard floor — 1.0 cycle, worst case) */}
+      {showBothLines && (
+        <>
+          <line x1={marginLeft} x2={W - marginRight} y1={yAt(minBalanceRequired)} y2={yAt(minBalanceRequired)}
+            stroke="#F5A623" strokeWidth="1.5" strokeDasharray="4 3" opacity="0.7" />
+          <text x={W - marginRight} y={yAt(minBalanceRequired) - 5} textAnchor="end" fontSize="9" fill="#F5A623" opacity="0.95">
+            Minimum balance required
+          </text>
+        </>
+      )}
 
       {/* $0 baseline, only drawn if the account is projected to go negative */}
       {yMin < 0 && (
@@ -2689,7 +2745,7 @@ function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) 
         </>
       )}
 
-      {/* paycheck deposit markers (why the line jumps back up) */}
+      {/* bills-transfer deposit markers (why the line jumps back up) */}
       {days.map((d, i) => d.paycheckToday > 0 ? (
         <line key={"pc" + i} x1={xAt(i)} x2={xAt(i)} y1={marginTop} y2={marginTop + plotH}
           stroke="#00D4AA" strokeWidth="1" strokeDasharray="2 2" opacity="0.3" />
@@ -2706,8 +2762,8 @@ function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) 
         <circle key={"b" + i} cx={xAt(i)} cy={yAt(d.bal)} r="2.5" fill="#FF9F0A" stroke="var(--card)" strokeWidth="1" />
       ) : null)}
 
-      {/* trough marker */}
-      <circle cx={xAt(troughDay)} cy={yAt(trough.bal)} r="4" fill="#FF6B6B" stroke="var(--card)" strokeWidth="1.5" />
+      {/* lowest point marker */}
+      <circle cx={xAt(troughDay)} cy={yAt(lowestPoint.bal)} r="4" fill="#FF6B6B" stroke="var(--card)" strokeWidth="1.5" />
 
       {/* y-axis labels */}
       <text x={2} y={yAt(yMax) + 9} fontSize="9" fill="var(--muted2)">{fmtShort(yMax)}</text>
@@ -2715,6 +2771,7 @@ function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) 
     </svg>
   );
 }
+
 
 
 function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paycheck, onSetFloatMultiplier }) {
@@ -2763,24 +2820,49 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
       <div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:14,padding:16,marginBottom:20}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
           <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)"}}>
-            Safety Stock (Float)
+            Cushion (Safety Stock)
           </div>
           <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:700,color:"var(--accent)"}}>
-            {floatMult.toFixed(1)}×
+            {sim.mult.toFixed(1)} cycle{sim.mult!==1?"s":""}
           </div>
         </div>
         <div style={{fontSize:12,color:"var(--muted2)",marginBottom:12,lineHeight:1.5}}>
-          How many months of bills to keep as a cushion in this account. Drag to see how it changes your trough below — no need to re-enter your paycheck here, that's set once in Planner.
+          1.0 cycle is the bare minimum — just enough to survive your single largest bill cycle before a paycheck lands. Drag up to add extra cushion, in units of full pay cycles. No need to re-enter your paycheck here, that's set once in Planner.
         </div>
-        <input type="range" min="0.5" max="4" step="0.1" value={floatMult}
+        <input type="range" min="1" max="4" step="0.1" value={sim.mult}
           disabled={!primaryBillsAcct}
           onChange={e=>onSetFloatMultiplier(primaryBillsAcct.last4+"_float", e.target.value)}
           style={{width:"100%",accentColor:"var(--accent)"}}/>
-        <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
-          <span style={{fontSize:10,color:"var(--muted2)"}}>0.5×</span>
-          {sim && <span style={{fontSize:10,color:"var(--muted2)"}}>Target: {fmt(sim.floatTarget)}</span>}
-          <span style={{fontSize:10,color:"var(--muted2)"}}>4×</span>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:4,marginBottom:12}}>
+          <span style={{fontSize:10,color:"var(--muted2)"}}>1.0 (minimum)</span>
+          <span style={{fontSize:10,color:"var(--muted2)"}}>4.0 cycles</span>
         </div>
+
+        <div style={{display:"flex",gap:10}}>
+          <div style={{flex:1,background:"var(--bg2)",borderRadius:10,padding:"10px 12px"}}>
+            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:3}}>Minimum Required</div>
+            <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:15,fontWeight:700,color:"#F5A623"}}>
+              {fmt(sim.minBalanceRequired)}
+            </div>
+          </div>
+          <div style={{flex:1,background:"var(--bg2)",borderRadius:10,padding:"10px 12px"}}>
+            <div style={{fontSize:9,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:3}}>Your Target</div>
+            <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:15,fontWeight:700,color:"var(--positive)"}}>
+              {fmt(sim.floatTarget)}
+            </div>
+          </div>
+        </div>
+        {sim.mult > 1 && (
+          <div style={{marginTop:8,fontSize:11,color:"var(--muted)"}}>
+            That's <strong style={{color:"var(--text2)"}}>{fmt(sim.floatTarget - sim.minBalanceRequired)}</strong> of extra
+            cushion beyond the minimum — {(sim.mult-1).toFixed(1)} additional pay cycle{(sim.mult-1).toFixed(1)!=="1.0"?"s":""} of safety net.
+          </div>
+        )}
+        {sim.minBalanceRequired === 0 && (
+          <div style={{marginTop:10,fontSize:11,color:"var(--muted)",background:"var(--bg2)",borderRadius:8,padding:"8px 10px"}}>
+            Add due dates to your bills so this can calculate your minimum required balance.
+          </div>
+        )}
         {!paycheck?.netPay && (
           <div style={{marginTop:10,fontSize:11,color:"var(--muted)",background:"var(--bg2)",borderRadius:8,padding:"8px 10px"}}>
             Set your paycheck amount and next payday in Bills → Planner for an accurate projection below.
@@ -2834,14 +2916,14 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
         {/* ── Sawtooth chart ── */}
         <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:14,padding:"16px 12px 12px",marginBottom:16}}>
           <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:10,paddingLeft:4}}>
-            Safety Stock Sawtooth · {sim.mult}× float
+            Safety Stock Sawtooth · {sim.mult.toFixed(1)}-cycle cushion
           </div>
           <TroughSawtoothChart days={sim.days} safeThresh={sim.safeThresh} warnThresh={sim.warnThresh}
-            mult={sim.mult} troughDay={sim.lowestDay}/>
+            minBalanceRequired={sim.minBalanceRequired} mult={sim.mult} troughDay={sim.lowestDay}/>
           <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:10,paddingLeft:4,fontSize:10,color:"var(--muted)"}}>
             <span><span style={{color:"#00D4AA"}}>┊</span> Bills transfer lands</span>
             <span><span style={{color:"#FF9F0A"}}>●</span> Bill paid</span>
-            <span><span style={{color:"#FF6B6B"}}>●</span> Trough — {fmt(sim.troughLowest)} on {sim.troughDate}</span>
+            <span><span style={{color:"#FF6B6B"}}>●</span> Lowest point — {fmt(sim.troughLowest)} on {sim.troughDate}</span>
           </div>
         </div>
 
@@ -2866,7 +2948,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
             <div style={{position:"absolute",left:`${safePct}%`,top:0,bottom:0,width:2,background:"var(--positive)",opacity:0.4}}/>
             {/* trough marker */}
             <div style={{position:"absolute",left:`${troughPct}%`,top:2,bottom:2,width:2,background:"#FF6B6B",opacity:0.7,borderRadius:1}}/>
-            <div style={{position:"absolute",left:`${Math.max(0,troughPct-8)}%`,top:10,fontSize:8,color:"#FF6B6B",opacity:0.8,whiteSpace:"nowrap"}}>▼trough</div>
+            <div style={{position:"absolute",left:`${Math.max(0,troughPct-8)}%`,top:10,fontSize:8,color:"#FF6B6B",opacity:0.8,whiteSpace:"nowrap"}}>▼ lowest</div>
             {/* current fill */}
             <div style={{position:"absolute",left:0,top:5,bottom:5,width:`${currentPct}%`,background:sim.zoneColor,borderRadius:10,transition:"width .5s ease"}}/>
           </div>
@@ -2875,7 +2957,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
           <div style={{display:"flex",justifyContent:"space-between",marginBottom:2}}>
             <span style={{fontSize:10,color:"#FF6B6B"}}>At risk</span>
             <span style={{fontSize:10,color:"#F5C842"}}>Watch it</span>
-            <span style={{fontSize:10,color:"var(--positive)"}}>Covered ({sim.mult}×)</span>
+            <span style={{fontSize:10,color:"var(--positive)"}}>Covered ({sim.mult.toFixed(1)} cycles)</span>
           </div>
           <div style={{display:"flex",justifyContent:"space-between"}}>
             <span style={{fontSize:10,color:"var(--muted)"}}>0</span>
@@ -2889,7 +2971,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
           <div key={a.last4} style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:12,padding:"12px 14px",marginBottom:8,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
             <div>
               <div style={{fontSize:13,fontWeight:500,color:"var(--text2)"}}>{a.label}</div>
-              <div style={{fontSize:11,color:"var(--muted)"}}>•••• {a.last4} · Float ×{a.floatMultiplier||1.5}</div>
+              <div style={{fontSize:11,color:"var(--muted)"}}>•••• {a.last4} · Cushion: {(a.floatMultiplier||1.5).toFixed(1)} cycles</div>
             </div>
             <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:600,color:"var(--accent)"}}>
               {latestBalance(a.last4)!==null ? fmt(latestBalance(a.last4)) : "—"}
@@ -2899,7 +2981,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
 
         {/* ── Cycle timeline ── */}
         <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",margin:"20px 0 10px"}}>
-          {sim.mult}× Float Simulation · {sim.days.length} days
+          {sim.mult.toFixed(1)}-Cycle Cushion Simulation · {sim.days.length} days
         </div>
 
         {cycles.slice(0, Math.ceil(sim.mult)+1).map((cycle, ci) => {
@@ -3220,20 +3302,12 @@ function PlannerScreen({ bills, paycheck, onSavePaycheck, embedded=false }) {
   const [freq,   setFreq]       = useState(paycheck.frequency || "biweekly");
   const [nextPayDate, setNextPayDate] = useState(paycheck.nextPayDate || "");
 
-  const FREQ_PER_YEAR = { weekly:52, biweekly:26, semimonthly:24, monthly:12 };
-  const perYear = FREQ_PER_YEAR[freq] || 26;
   const net = parseFloat(netPay) || 0;
 
-  function reservePerPaycheck(bill) {
-    const myPct  = parseFloat(bill.myPct) || 100;
-    const annual = (parseFloat(bill.amount) || 0) * (FREQ_PER_YEAR_MAP[bill.frequency] || 12) * (myPct / 100);
-    return annual / perYear;
-  }
-
-  const lineItems = bills.map(b => ({ ...b, reserve: reservePerPaycheck(b) }))
+  const lineItems = bills.map(b => ({ ...b, reserve: billReservePerPaycheck(b, freq) }))
                          .filter(b => b.reserve > 0)
                          .sort((a,b) => b.reserve - a.reserve);
-  const totalReserve = lineItems.reduce((s,b) => s + b.reserve, 0);
+  const totalReserve = computeReservePerPaycheck(bills, freq);
   const remaining    = net - totalReserve;
 
   const resolvedNextPay = resolveNextPayDate(nextPayDate, PAY_CYCLE_DAYS[freq] || 14);
