@@ -2613,32 +2613,121 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
 
 // ─── BillsScaleView ──────────────────────────────────────────────────────────
 
-function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paycheck, billsOverride, onSaveBillsOverride }) {
+// ─── Sawtooth Safety-Stock Chart ──────────────────────────────────────────────
+// Classic inventory/safety-stock sawtooth: balance flat between events, drops
+// on bill days, jumps back up on paydays. Segment color reflects the same
+// zone thresholds used everywhere else in the app (green/amber/orange/red).
+
+function zoneColorFor(v, safeThresh, warnThresh) {
+  if (v >= safeThresh) return "#00D4AA";
+  if (v >= warnThresh) return "#F5C842";
+  if (v >= 0)          return "#F5A623";
+  return "#FF6B6B";
+}
+
+function TroughSawtoothChart({ days, safeThresh, warnThresh, mult, troughDay }) {
+  const W = 600, H = 210;
+  const marginLeft = 46, marginRight = 10, marginTop = 18, marginBottom = 8;
+  const plotW = W - marginLeft - marginRight;
+  const plotH = H - marginTop - marginBottom;
+
+  const values = days.map(d => d.bal);
+  const minVal = Math.min(0, ...values);
+  const maxVal = Math.max(safeThresh, ...values);
+  const pad = Math.max((maxVal - minVal) * 0.1, 1);
+  const yMin = minVal - pad;
+  const yMax = maxVal + pad;
+
+  const xAt = i => marginLeft + (days.length <= 1 ? 0 : (i / (days.length - 1)) * plotW);
+  const yAt = v => marginTop + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  // Group consecutive days into same-zone-color polyline segments (connecting
+  // point-to-point across boundaries so the line stays continuous)
+  const segments = [];
+  let curColor = null, curPts = [];
+  days.forEach((d, i) => {
+    const col = zoneColorFor(d.bal, safeThresh, warnThresh);
+    const pt = `${xAt(i)},${yAt(d.bal)}`;
+    if (col !== curColor) {
+      if (curPts.length) segments.push({ color: curColor, pts: curPts });
+      curPts = curPts.length ? [curPts[curPts.length - 1], pt] : [pt];
+      curColor = col;
+    } else {
+      curPts.push(pt);
+    }
+  });
+  if (curPts.length) segments.push({ color: curColor, pts: curPts });
+
+  const areaPath = `M${xAt(0)},${yAt(yMin)} ` +
+    days.map((d, i) => `L${xAt(i)},${yAt(d.bal)}`).join(" ") +
+    ` L${xAt(days.length - 1)},${yAt(yMin)} Z`;
+
+  const trough = days[troughDay] ?? days.reduce((a, b) => (b.bal < a.bal ? b : a), days[0]);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", display: "block", overflow: "visible" }}>
+      {/* area under the curve */}
+      <path d={areaPath} fill="var(--accent)" opacity="0.08" />
+
+      {/* safety stock reference line */}
+      <line x1={marginLeft} x2={W - marginRight} y1={yAt(safeThresh)} y2={yAt(safeThresh)}
+        stroke="#00D4AA" strokeWidth="1.5" strokeDasharray="4 3" opacity="0.65" />
+      <text x={W - marginRight} y={yAt(safeThresh) - 5} textAnchor="end" fontSize="9" fill="#00D4AA" opacity="0.9">
+        Safety stock ({mult}×)
+      </text>
+
+      {/* $0 baseline, only drawn if the account is projected to go negative */}
+      {yMin < 0 && (
+        <>
+          <line x1={marginLeft} x2={W - marginRight} y1={yAt(0)} y2={yAt(0)}
+            stroke="#FF6B6B" strokeWidth="1.5" strokeDasharray="2 3" opacity="0.6" />
+          <text x={marginLeft} y={yAt(0) - 5} fontSize="9" fill="#FF6B6B" opacity="0.9">$0</text>
+        </>
+      )}
+
+      {/* paycheck deposit markers (why the line jumps back up) */}
+      {days.map((d, i) => d.paycheckToday > 0 ? (
+        <line key={"pc" + i} x1={xAt(i)} x2={xAt(i)} y1={marginTop} y2={marginTop + plotH}
+          stroke="#00D4AA" strokeWidth="1" strokeDasharray="2 2" opacity="0.3" />
+      ) : null)}
+
+      {/* the sawtooth itself, colored by zone */}
+      {segments.map((seg, i) => (
+        <polyline key={i} points={seg.pts.join(" ")} fill="none"
+          stroke={seg.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
+      ))}
+
+      {/* bill payment markers (why the line drops) */}
+      {days.map((d, i) => d.billsDue > 0 ? (
+        <circle key={"b" + i} cx={xAt(i)} cy={yAt(d.bal)} r="2.5" fill="#FF9F0A" stroke="var(--card)" strokeWidth="1" />
+      ) : null)}
+
+      {/* trough marker */}
+      <circle cx={xAt(troughDay)} cy={yAt(trough.bal)} r="4" fill="#FF6B6B" stroke="var(--card)" strokeWidth="1.5" />
+
+      {/* y-axis labels */}
+      <text x={2} y={yAt(yMax) + 9} fontSize="9" fill="var(--muted2)">{fmtShort(yMax)}</text>
+      <text x={2} y={yAt(yMin) - 2} fontSize="9" fill="var(--muted2)">{fmtShort(yMin)}</text>
+    </svg>
+  );
+}
+
+
+function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paycheck, onSetFloatMultiplier }) {
   const { billsBanks, totalBillsBal, monthlyTotal } = computeBillsHealth(accounts, bills, latestBalance);
 
-  // Local override for pay settings (pulls from planner as default)
-  const [localNetPay, setLocalNetPay]   = useState(billsOverride?.netPay   ?? paycheck?.netPay   ?? "");
-  const [localFreq,   setLocalFreq]     = useState(billsOverride?.frequency ?? paycheck?.frequency ?? "biweekly");
-  const [localNextPayDate, setLocalNextPayDate] = useState(billsOverride?.nextPayDate ?? paycheck?.nextPayDate ?? "");
-
-  // Float multiplier from bills_bank accounts (use first one found, default 1.5)
-  const floatMult = billsBanks[0]?.floatMultiplier ?? 1.5;
+  // Float multiplier from the primary bills_bank account (default 1.5)
+  const primaryBillsAcct = billsBanks[0];
+  const floatMult = primaryBillsAcct?.floatMultiplier ?? 1.5;
 
   const sim = billsBanks.length > 0 ? runTroughSimulation({
     bills, totalBillsBal,
-    netPay: localNetPay,
-    frequency: localFreq,
+    netPay: paycheck?.netPay ?? "",
+    frequency: paycheck?.frequency ?? "biweekly",
     floatMult,
     accounts,
-    nextPayDate: localNextPayDate,
+    nextPayDate: paycheck?.nextPayDate ?? "",
   }) : null;
-
-  const PAY_FREQS = [
-    { v:"weekly",      l:"Weekly" },
-    { v:"biweekly",    l:"Biweekly (every 2 wks)" },
-    { v:"semimonthly", l:"Semi-monthly (twice/mo)" },
-    { v:"monthly",     l:"Monthly" },
-  ];
 
   if (billsBanks.length === 0) return (
     <div className="history-empty">No bills account set up.<br/>Add an account with the Bills role in Accounts.</div>
@@ -2666,40 +2755,33 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
   return (
     <div style={{padding:"0 16px 20px"}}>
 
-      {/* ── Pay settings override ── */}
+      {/* ── Safety stock (float) adjuster ── */}
       <div style={{background:"var(--card2)",border:"1px solid var(--border2)",borderRadius:14,padding:16,marginBottom:20}}>
-        <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:12}}>
-          Paycheck Settings
-        </div>
-        <div style={{display:"flex",gap:10,marginBottom:10}}>
-          <div style={{flex:1}}>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Net Pay</div>
-            <input className="text-input" style={{padding:"8px 12px",fontSize:14}}
-              placeholder="e.g. 3200" type="number" inputMode="decimal"
-              value={localNetPay}
-              onChange={e=>setLocalNetPay(e.target.value)}
-              onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:4}}>
+          <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)"}}>
+            Safety Stock (Float)
           </div>
-          <div style={{flex:1}}>
-            <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Frequency</div>
-            <select className="form-select" style={{padding:"8px 12px",fontSize:13}}
-              value={localFreq}
-              onChange={e=>{setLocalFreq(e.target.value);onSaveBillsOverride({netPay:localNetPay,frequency:e.target.value,nextPayDate:localNextPayDate});}}>
-              {PAY_FREQS.map(o=><option key={o.v} value={o.v}>{o.l}</option>)}
-            </select>
+          <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:16,fontWeight:700,color:"var(--accent)"}}>
+            {floatMult.toFixed(1)}×
           </div>
         </div>
-        <div style={{marginBottom:10}}>
-          <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Next Payday</div>
-          <input className="text-input" style={{padding:"8px 12px",fontSize:14}}
-            type="date"
-            value={localNextPayDate}
-            onChange={e=>setLocalNextPayDate(e.target.value)}
-            onBlur={()=>onSaveBillsOverride({netPay:localNetPay,frequency:localFreq,nextPayDate:localNextPayDate})}/>
+        <div style={{fontSize:12,color:"var(--muted2)",marginBottom:12,lineHeight:1.5}}>
+          How many months of bills to keep as a cushion in this account. Drag to see how it changes your trough below — no need to re-enter your paycheck here, that's set once in Planner.
         </div>
-        <div style={{fontSize:11,color:"var(--muted2)"}}>
-          Float × {floatMult} set in Accounts · Pulls from Planner by default. Set the date once — it auto-advances each cycle.
+        <input type="range" min="0.5" max="4" step="0.1" value={floatMult}
+          disabled={!primaryBillsAcct}
+          onChange={e=>onSetFloatMultiplier(primaryBillsAcct.last4+"_float", e.target.value)}
+          style={{width:"100%",accentColor:"var(--accent)"}}/>
+        <div style={{display:"flex",justifyContent:"space-between",marginTop:4}}>
+          <span style={{fontSize:10,color:"var(--muted2)"}}>0.5×</span>
+          {sim && <span style={{fontSize:10,color:"var(--muted2)"}}>Target: {fmt(sim.floatTarget)}</span>}
+          <span style={{fontSize:10,color:"var(--muted2)"}}>4×</span>
         </div>
+        {!paycheck?.netPay && (
+          <div style={{marginTop:10,fontSize:11,color:"var(--muted)",background:"var(--bg2)",borderRadius:8,padding:"8px 10px"}}>
+            Set your paycheck amount and next payday in Bills → Planner for an accurate projection below.
+          </div>
+        )}
       </div>
 
       {sim && <>
@@ -2720,7 +2802,7 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
             <div style={{flex:1}}>
               <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:"0.5px",marginBottom:3}}>Next Paycheck</div>
               <div style={{fontSize:15,fontWeight:600,color:"var(--text)"}}>
-                {sim.nextPaycheckDateStr || "Set a date above"}
+                {sim.nextPaycheckDateStr || "Set in Planner"}
               </div>
               {sim.daysUntilPaycheck !== null && <div style={{fontSize:11,color:"var(--muted)",marginTop:1}}>in {sim.daysUntilPaycheck}d</div>}
             </div>
@@ -2745,53 +2827,18 @@ function BillsScaleView({ accounts, bills, latestBalance, dueThresholds, paychec
           )}
         </div>
 
-        {/* ── Trough warning card ── */}
-        <div style={{
-          background: sim.troughLowest < 0 ? "#FF6B6B12" : "var(--card)",
-          border:`1px solid ${sim.troughLowest < 0 ? "#FF6B6B40" : "var(--border)"}`,
-          borderRadius:14, padding:16, marginBottom:16
-        }}>
-          <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:10}}>
-            Trough Forecast
+        {/* ── Sawtooth chart ── */}
+        <div style={{background:"var(--card)",border:"1px solid var(--border)",borderRadius:14,padding:"16px 12px 12px",marginBottom:16}}>
+          <div style={{fontSize:10,fontWeight:600,letterSpacing:"2px",textTransform:"uppercase",color:"var(--muted2)",marginBottom:10,paddingLeft:4}}>
+            Safety Stock Sawtooth · {sim.mult}× float
           </div>
-          <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-            <div>
-              <div style={{fontSize:13,color:"var(--text2)",marginBottom:4}}>
-                Lowest expected balance
-              </div>
-              <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:28,fontWeight:700,
-                color:sim.troughLowest>=sim.warnThresh?"#00D4AA":sim.troughLowest>=0?"#F5C842":"#FF6B6B",
-                lineHeight:1}}>
-                {fmt(sim.troughLowest)}
-              </div>
-              <div style={{fontSize:11,color:"var(--muted)",marginTop:4}}>
-                Around {sim.troughDate} · day {sim.lowestDay} of simulation
-              </div>
-            </div>
-            <div style={{textAlign:"right"}}>
-              <div style={{fontSize:11,color:"var(--muted)",marginBottom:4}}>Trough depth</div>
-              <div style={{fontFamily:"'Space Grotesk',monospace",fontSize:18,fontWeight:600,
-                color: sim.troughExposure > totalBillsBal*0.5 ? "#FF6B6B" : "#F5C842"}}>
-                −{fmt(sim.troughExposure)}
-              </div>
-              <div style={{fontSize:10,color:"var(--muted2)",marginTop:2}}>from current</div>
-            </div>
+          <TroughSawtoothChart days={sim.days} safeThresh={sim.safeThresh} warnThresh={sim.warnThresh}
+            mult={sim.mult} troughDay={sim.lowestDay}/>
+          <div style={{display:"flex",gap:14,flexWrap:"wrap",marginTop:10,paddingLeft:4,fontSize:10,color:"var(--muted)"}}>
+            <span><span style={{color:"#00D4AA"}}>┊</span> Paycheck lands</span>
+            <span><span style={{color:"#FF9F0A"}}>●</span> Bill paid</span>
+            <span><span style={{color:"#FF6B6B"}}>●</span> Trough — {fmt(sim.troughLowest)} on {sim.troughDate}</span>
           </div>
-          {sim.troughLowest < 0 && (
-            <div style={{marginTop:12,padding:"8px 12px",background:"#FF6B6B18",borderRadius:8,fontSize:12,color:"#FF6B6B"}}>
-              ⚠ With a {sim.mult}× float this account would go negative. Consider raising the float or moving more money in.
-            </div>
-          )}
-          {sim.troughLowest >= 0 && sim.troughLowest < sim.warnThresh && (
-            <div style={{marginTop:12,padding:"8px 12px",background:"#F5C84218",borderRadius:8,fontSize:12,color:"#F5C842"}}>
-              This account gets tight but stays positive. You're betting on no surprises.
-            </div>
-          )}
-          {sim.troughLowest >= sim.warnThresh && (
-            <div style={{marginTop:12,padding:"8px 12px",background:"#00D4AA12",borderRadius:8,fontSize:12,color:"var(--positive)"}}>
-              Your float fully covers the {sim.mult}× window. You have room for variable bills.
-            </div>
-          )}
         </div>
 
         {/* ── Scale bar ── */}
@@ -3014,7 +3061,7 @@ function BillForm({ bill, accounts, onSave, onCancel }) {
   );
 }
 
-function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, latestBalance, dueThresholds, paycheck, onSavePaycheck }) {
+function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, latestBalance, dueThresholds, paycheck, onSavePaycheck, onSetDueDay }) {
   const [showForm, setShowForm] = useState(false);
   const [editingBill, setEditingBill] = useState(null);
 
@@ -3048,7 +3095,8 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
       )}
 
       {viewMode === "scale" && (
-        <BillsScaleView accounts={accounts} bills={bills} latestBalance={latestBalance} dueThresholds={dueThresholds}/>
+        <BillsScaleView accounts={accounts} bills={bills} latestBalance={latestBalance} dueThresholds={dueThresholds}
+          paycheck={paycheck} onSetFloatMultiplier={onSetDueDay}/>
       )}
       {viewMode === "planner" && (
         <PlannerScreen bills={bills} paycheck={paycheck} onSavePaycheck={onSavePaycheck} embedded={true}/>
@@ -4218,6 +4266,7 @@ function Safe2SpendApp() {
             latestBalance={latestBalance} dueThresholds={dueThresholds}
             paycheck={paycheck} onSavePaycheck={setPaycheckP}
             billsOverride={billsOverride} onSaveBillsOverride={setBillsOverrideP}
+            onSetDueDay={handleSetDueDay}
           />
         )}
 
