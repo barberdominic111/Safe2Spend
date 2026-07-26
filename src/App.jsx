@@ -2235,15 +2235,6 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
     .filter(a => a.days !== null && a.days <= 14)
     .sort((a,b) => a.days - b.days);
 
-  // Float status
-  const monthlyBillsByAcct = {};
-  bills.forEach(b => {
-    const BILL_FREQ = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
-    const monthly = (parseFloat(b.amount) || 0) * ((BILL_FREQ[b.frequency] || 12) / 12);
-    const acct = b.paymentAcct;
-    if (acct) monthlyBillsByAcct[acct] = (monthlyBillsByAcct[acct] || 0) + monthly;
-  });
-
   const primaryAcct = incomeAccts[0];
   const primaryBal  = primaryAcct ? latestBalance(primaryAcct.last4) : null;
   const primaryStart = primaryAcct ? firstBalance(primaryAcct.last4) : null;
@@ -2365,22 +2356,27 @@ function DashboardScreen({ safeToSpend, thresholds, thresholdMode, firstBalance,
 
         {/* Float status */}
         {accounts.filter(a => a.floatEnabled !== false && a.floatMultiplier).map(a => {
-          const monthly = monthlyBillsByAcct[a.last4] || 0;
-          const targetMult = a.floatMultiplier || 1.5;
-          const target  = monthly * targetMult;
+          const cycleLen = PAY_CYCLE_DAYS[billsOverride?.frequency ?? freq] || 14;
+          const { monthlyTotal: acctMonthly, minBalanceRequired } = computeAccountMinBalanceRequired(bills, a.last4, cycleLen);
+          const targetMult = Math.max(1, parseFloat(a.floatMultiplier) || 1.5);
+          const target  = minBalanceRequired * targetMult;
           const bal     = latestBalance(a.last4) ?? 0;
-          const actualMult = target > 0 ? (bal / monthly) : null;
+          const actualCycles = minBalanceRequired > 0 ? (bal / minBalanceRequired) : null;
           const diff    = bal - target;
           const col     = diff >= 0 ? "#00D4AA" : bal >= target * 0.75 ? "#F5C842" : "#FF6B6B";
           return (
             <div className="dash-card" key={a.last4}>
               <div className="dash-card-label">Operating Float · {a.label}</div>
               <div className="dash-card-value" style={{color:col}}>{fmtShort(bal)}</div>
-              <div className="dash-card-sub">
-                Target {fmtShort(target)} ({targetMult}×)
-                {actualMult !== null && ` · Actual ${actualMult.toFixed(1)}×`}
-                {" · "}{diff>=0?"+":""}{fmtShort(diff)}
-              </div>
+              {acctMonthly > 0 ? (
+                <div className="dash-card-sub">
+                  Target {fmtShort(target)} ({targetMult.toFixed(1)} cycles)
+                  {actualCycles !== null && ` · Actual ${actualCycles.toFixed(1)} cycles`}
+                  {" · "}{diff>=0?"+":""}{fmtShort(diff)}
+                </div>
+              ) : (
+                <div className="dash-card-sub">No bills draft from this account yet</div>
+              )}
             </div>
           );
         })}
@@ -2458,6 +2454,26 @@ function computeWorstCycleBillTotal(billEvents, cycleLen, spanDays = 400) {
     if (windowSum > best) best = windowSum;
   }
   return best;
+}
+
+// Same "worst single pay cycle" concept as the Scale tab's minBalanceRequired,
+// but for ANY account — grouped by which bills actually draft from it
+// (bill.paymentAcct), myPct-adjusted for consistency with the rest of the
+// bills math. Used by Dashboard's per-account Operating Float card so it
+// can never show a different number than the Scale tab for the same
+// account and the same stored floatMultiplier.
+function computeAccountMinBalanceRequired(bills, last4, cycleLen) {
+  const billEvents = {};
+  bills.forEach(b => {
+    if (b.paymentAcct !== last4 || !b.dueDay) return;
+    const myPct = (parseFloat(b.myPct) || 100) / 100;
+    const monthly = (parseFloat(b.amount) || 0) * ((FREQ_PER_YEAR_MAP[b.frequency] || 12) / 12) * myPct;
+    if (monthly <= 0) return;
+    billEvents[b.dueDay] = (billEvents[b.dueDay] || 0) + monthly;
+  });
+  const monthlyTotal = Object.values(billEvents).reduce((s, v) => s + v, 0);
+  const minBalanceRequired = computeWorstCycleBillTotal(billEvents, cycleLen);
+  return { monthlyTotal, minBalanceRequired };
 }
 
 // ─── Trough Simulation Engine ─────────────────────────────────────────────────
