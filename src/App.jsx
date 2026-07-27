@@ -11,6 +11,16 @@ function fmtShort(n) {
   const abs = Math.abs(n);
   return (n < 0 ? "-" : "") + "$" + abs.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
+// The hero ring has a fixed diameter — long strings (big numbers, negatives)
+// need a smaller font so they never overflow past the ring's inner edge.
+function heroAmountFontSize(str) {
+  const len = (str || "").length;
+  if (len <= 6) return 40;
+  if (len === 7) return 34;
+  if (len === 8) return 29;
+  if (len === 9) return 25;
+  return 22;
+}
 function nowISO() { return new Date().toISOString(); }
 function fmtTime(iso) {
   const d = new Date(iso);
@@ -503,13 +513,22 @@ const S = `
 
   /* ── Bills ── */
   .bill-list { padding:0 16px; display:flex; flex-direction:column; gap:6px; margin-bottom:80px; }
-  .bill-card { position:relative; background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:16px 18px; }
+  .bill-card { position:relative; background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:12px 18px 16px; }
   .card-remove-btn {
     position:absolute; top:10px; right:10px; width:22px; height:22px;
     border-radius:6px; border:none; background:#FF453A12; color:#FF453A;
     font-size:12px; line-height:1; cursor:pointer; display:flex;
     align-items:center; justify-content:center; z-index:2;
   }
+  .bill-card-toolbar { display:flex; justify-content:flex-end; align-items:center; gap:6px; margin-bottom:8px; }
+  .card-icon-btn {
+    width:22px; height:22px; border-radius:6px; border:none; cursor:pointer;
+    font-size:11px; line-height:1; display:flex; align-items:center; justify-content:center;
+    flex-shrink:0;
+  }
+  .card-icon-btn.move   { background:var(--muted3); color:var(--text2); }
+  .card-icon-btn.move:disabled { opacity:0.35; cursor:default; }
+  .card-icon-btn.remove { background:#FF453A12; color:#FF453A; }
   .bill-card-top { display:flex; justify-content:space-between; align-items:flex-start; }
   .bill-name { font-size:15px; font-weight:600; color:var(--text); }
   .bill-meta { font-size:12px; color:var(--muted); margin-top:3px; line-height:1.6; }
@@ -1225,7 +1244,7 @@ function SpendingScreen({ accounts, snapshots, safeToSpend, residuals, threshold
           <SafeToSpendRing pct={Math.min(100,Math.max(0,(safeToSpend??0)/Math.max(1,totalBank)*100))} color={heroCol}/>
           <div className="hero-ring-wrap" style={{position:"absolute",top:0,left:0,right:0,bottom:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center"}}>
             <div className="hero-eyebrow">Safe to spend</div>
-            <div key={heroKey} className="hero-amount anim" style={{color:heroCol}}>
+            <div key={heroKey} className="hero-amount anim" style={{color:heroCol,fontSize:heroAmountFontSize(fmtShort(safeToSpend))}}>
               {fmtShort(safeToSpend)}
             </div>
             <div className="hero-sub">
@@ -1415,7 +1434,7 @@ function HistoryScreen({ snapshots, accounts }) {
 
 // Column headers — widest record type wins (Bills has most columns)
 const CSV_HEADERS = [
-  "Type","id","last4","label","role","rank","dueDay","floatEnabled","floatMultiplier",
+  "Type","id","last4","label","role","rank","dueDay","dueDay2","floatEnabled","floatMultiplier",
   "balance","timestamp","source",
   "name","amount","frequency","myPct","theirPct","fundingAcct","paymentAcct",
   "creditCard","isFixed","isAutopay","isEF","isRetire","rewardMult","notes",
@@ -1472,7 +1491,7 @@ function buildExportRows(accounts, snapshots, bills, paycheck, billsOverride,
       Type:"BILL", id:b.id, name:b.name, amount:b.amount,
       frequency:b.frequency, myPct:b.myPct, theirPct:b.theirPct,
       fundingAcct:b.fundingAcct, paymentAcct:b.paymentAcct,
-      creditCard:b.creditCard, dueDay:b.dueDay??"",
+      creditCard:b.creditCard, dueDay:b.dueDay??"", dueDay2:b.dueDay2??"",
       isFixed:b.isFixed, isAutopay:b.isAutopay,
       isEF:b.isEF, isRetire:b.isRetire,
       rewardMult:b.rewardMult, notes:b.notes
@@ -1643,6 +1662,7 @@ function importFromRows(rows, callbacks) {
       paymentAcct: r.paymentAcct?.trim() || "",
       creditCard:  r.creditCard?.trim() || "",
       dueDay:      parseIntOrNull(r.dueDay),
+      dueDay2:     parseIntOrNull(r.dueDay2),
       isFixed:     parseBool(r.isFixed) ?? true,
       isAutopay:   parseBool(r.isAutopay) ?? false,
       isEF:        parseBool(r.isEF) ?? false,
@@ -2477,6 +2497,32 @@ function computeWorstCycleBillTotal(billEvents, cycleLen, spanDays = 400) {
   return best;
 }
 
+// Adds one bill's contribution(s) to a day-of-month -> $ bucket map. Most
+// frequencies contribute a single monthly-equivalent bucket at their due
+// day. Semimonthly is the one case that gets split into its two REAL due
+// dates, each at the bill's actual per-occurrence amount (not a monthly
+// average) — two fixed days-of-month genuinely repeat unchanged every
+// month, so this still fits the bucket model exactly (unlike weekly/
+// biweekly, whose real occurrences drift across different days-of-month
+// from one month to the next).
+function addBillToBillEvents(billEvents, bill) {
+  const myPct = (parseFloat(bill.myPct) || 100) / 100;
+  if (bill.frequency === "semimonthly") {
+    const day1 = bill.dueDay2;
+    const day2 = bill.dueDay;
+    if (!day1 || !day2) return;
+    const amt = (parseFloat(bill.amount) || 0) * myPct;
+    if (amt <= 0) return;
+    billEvents[day1] = (billEvents[day1] || 0) + amt;
+    billEvents[day2] = (billEvents[day2] || 0) + amt;
+  } else {
+    if (!bill.dueDay) return;
+    const monthly = (parseFloat(bill.amount) || 0) * ((FREQ_PER_YEAR_MAP[bill.frequency] || 12) / 12) * myPct;
+    if (monthly <= 0) return;
+    billEvents[bill.dueDay] = (billEvents[bill.dueDay] || 0) + monthly;
+  }
+}
+
 // Same "worst single pay cycle" concept as the Scale tab's minBalanceRequired,
 // but for ANY account — grouped by which bills actually draft from it
 // (bill.paymentAcct), myPct-adjusted for consistency with the rest of the
@@ -2486,11 +2532,8 @@ function computeWorstCycleBillTotal(billEvents, cycleLen, spanDays = 400) {
 function computeAccountMinBalanceRequired(bills, last4, cycleLen) {
   const billEvents = {};
   bills.forEach(b => {
-    if (b.paymentAcct !== last4 || !b.dueDay) return;
-    const myPct = (parseFloat(b.myPct) || 100) / 100;
-    const monthly = (parseFloat(b.amount) || 0) * ((FREQ_PER_YEAR_MAP[b.frequency] || 12) / 12) * myPct;
-    if (monthly <= 0) return;
-    billEvents[b.dueDay] = (billEvents[b.dueDay] || 0) + monthly;
+    if (b.paymentAcct !== last4) return;
+    addBillToBillEvents(billEvents, b);
   });
   const monthlyTotal = Object.values(billEvents).reduce((s, v) => s + v, 0);
   const minBalanceRequired = computeWorstCycleBillTotal(billEvents, cycleLen);
@@ -2569,17 +2612,9 @@ function runTroughSimulation({ bills, totalBillsBal, netPay, frequency, floatMul
   const windowDays = Math.max(30, Math.ceil(mult * cycleLen) + cycleLen, firstPayOffset + cycleLen);
 
   // Build bill events: day-of-month → total amount due
-  const FREQ_MAP = { weekly:52, biweekly:26, semimonthly:24, monthly:12, quarterly:4, annual:1, onetime:0 };
   const billEvents = {}; // { [dayOfMonth]: amount }
 
-  bills.forEach(b => {
-    const day = b.dueDay;
-    if (!day) return;
-    const myPct = (parseFloat(b.myPct) || 100) / 100;
-    const monthly = (parseFloat(b.amount)||0) * ((FREQ_MAP[b.frequency]||12)/12) * myPct;
-    if (monthly <= 0) return;
-    billEvents[day] = (billEvents[day] || 0) + monthly;
-  });
+  bills.forEach(b => addBillToBillEvents(billEvents, b));
 
   const monthlyTotal = Object.values(billEvents).reduce((s,v)=>s+v,0);
 
@@ -3091,7 +3126,7 @@ function monthlyEquiv(bill) {
 const EMPTY_BILL = {
   name:"", amount:"", frequency:"monthly", myPct:"100", theirPct:"0",
   fundingAcct:"", paymentAcct:"", creditCard:"", rewardMult:"",
-  isEF:false, isRetire:false, isFixed:true, isAutopay:false, notes:"", dueDay:null
+  isEF:false, isRetire:false, isFixed:true, isAutopay:false, notes:"", dueDay:null, dueDay2:null
 };
 
 function BillForm({ bill, accounts, onSave, onCancel }) {
@@ -3163,15 +3198,34 @@ function BillForm({ bill, accounts, onSave, onCancel }) {
           <label className="form-label">Notes</label>
           <input className="form-input" placeholder="Optional notes" value={b.notes} onChange={e=>set("notes",e.target.value)}/>
         </div>
-        <div className="form-group">
-          <label className="form-label">Due Day of Month</label>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <input className="form-input" style={{maxWidth:100}} placeholder="e.g. 15"
-              type="number" inputMode="numeric" min="1" max="31"
-              value={b.dueDay??""} onChange={e=>set("dueDay", e.target.value ? parseInt(e.target.value) : null)}/>
-            <span style={{fontSize:13,color:"var(--muted)"}}>of each month</span>
+        {b.frequency === "semimonthly" ? (
+          <div className="form-group">
+            <label className="form-label">Due Days (twice a month)</label>
+            <div style={{display:"flex",alignItems:"center",gap:8}}>
+              <input className="form-input" style={{maxWidth:90}} placeholder="e.g. 5"
+                type="number" inputMode="numeric" min="1" max="31"
+                value={b.dueDay2??""} onChange={e=>set("dueDay2", e.target.value ? parseInt(e.target.value) : null)}/>
+              <span style={{fontSize:13,color:"var(--muted)"}}>and</span>
+              <input className="form-input" style={{maxWidth:90}} placeholder="e.g. 20"
+                type="number" inputMode="numeric" min="1" max="31"
+                value={b.dueDay??""} onChange={e=>set("dueDay", e.target.value ? parseInt(e.target.value) : null)}/>
+              <span style={{fontSize:13,color:"var(--muted)"}}>of each month</span>
+            </div>
+            <div style={{fontSize:11,color:"var(--muted2)",marginTop:6,lineHeight:1.5}}>
+              {b.amount ? `${fmt(parseFloat(b.amount)||0)} comes out on each date` : "Enter an amount above — that full amount comes out on each date"}
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="form-group">
+            <label className="form-label">Due Day of Month</label>
+            <div style={{display:"flex",alignItems:"center",gap:10}}>
+              <input className="form-input" style={{maxWidth:100}} placeholder="e.g. 15"
+                type="number" inputMode="numeric" min="1" max="31"
+                value={b.dueDay??""} onChange={e=>set("dueDay", e.target.value ? parseInt(e.target.value) : null)}/>
+              <span style={{fontSize:13,color:"var(--muted)"}}>of each month</span>
+            </div>
+          </div>
+        )}
         <div className="form-toggle-row"><span className="form-toggle-label">Fixed (not variable)</span><Toggle k="isFixed"/></div>
         <div className="form-toggle-row"><span className="form-toggle-label">Autopay</span><Toggle k="isAutopay"/></div>
         <div className="form-toggle-row"><span className="form-toggle-label">Emergency Fund Expense</span><Toggle k="isEF"/></div>
@@ -3184,7 +3238,7 @@ function BillForm({ bill, accounts, onSave, onCancel }) {
   );
 }
 
-function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, latestBalance, dueThresholds, paycheck, onSavePaycheck, onSetDueDay }) {
+function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, onMoveBill, latestBalance, dueThresholds, paycheck, onSavePaycheck, onSetDueDay }) {
   const [showForm, setShowForm] = useState(false);
   const [editingBill, setEditingBill] = useState(null);
 
@@ -3226,12 +3280,18 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
       )}
       {viewMode === "tile" && (
         <div className="bill-list">
-          {bills.map(bill => {
+          {bills.map((bill, idx) => {
             const monthly = monthlyEquiv(bill) * ((parseFloat(bill.myPct)||100)/100);
             return (
               <div className="bill-card" key={bill.id}>
-                <button className="card-remove-btn" title="Remove bill"
-                  onClick={()=>{ if(confirmDelete(bill.name||"this bill")) onDeleteBill(bill.id); }}>✕</button>
+                <div className="bill-card-toolbar">
+                  <button className="card-icon-btn move" title="Move up" disabled={idx===0}
+                    onClick={()=>onMoveBill(bill.id,"up")}>↑</button>
+                  <button className="card-icon-btn move" title="Move down" disabled={idx===bills.length-1}
+                    onClick={()=>onMoveBill(bill.id,"down")}>↓</button>
+                  <button className="card-icon-btn remove" title="Remove bill"
+                    onClick={()=>{ if(confirmDelete(bill.name||"this bill")) onDeleteBill(bill.id); }}>✕</button>
+                </div>
                 <div className="bill-card-top">
                   <div>
                     <div className="bill-name">{bill.name}</div>
@@ -4316,6 +4376,16 @@ function Safe2SpendApp() {
   function handleAddBill(b)    { const nb = {...b, id: Date.now()}; setBillsP(prev => [...prev, nb]); showToast("Bill added"); }
   function handleEditBill(b)   { setBillsP(prev => prev.map(x => x.id === b.id ? b : x)); showToast("Bill updated"); }
   function handleDeleteBill(id){ setBillsP(prev => prev.filter(x => x.id !== id)); showToast("Bill removed"); }
+  function handleMoveBill(id, dir) {
+    setBillsP(prev => {
+      const idx = prev.findIndex(b => b.id === id);
+      const swapIdx = dir === "up" ? idx - 1 : idx + 1;
+      if (idx === -1 || swapIdx < 0 || swapIdx >= prev.length) return prev;
+      const arr = [...prev];
+      [arr[idx], arr[swapIdx]] = [arr[swapIdx], arr[idx]];
+      return arr;
+    });
+  }
 
   // ── Investment handlers ──────────────────────────────────────────────────
   function handleAddInvest(v)    { setInvestmentsP(prev => [...prev, {...v, id: Date.now()}]); showToast("Goal added"); }
@@ -4382,6 +4452,7 @@ function Safe2SpendApp() {
           <BillsScreen
             bills={bills} accounts={accounts}
             onAddBill={handleAddBill} onEditBill={handleEditBill} onDeleteBill={handleDeleteBill}
+            onMoveBill={handleMoveBill}
             latestBalance={latestBalance} dueThresholds={dueThresholds}
             paycheck={paycheck} onSavePaycheck={setPaycheckP}
             billsOverride={billsOverride} onSaveBillsOverride={setBillsOverrideP}
