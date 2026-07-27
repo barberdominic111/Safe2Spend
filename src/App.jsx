@@ -239,6 +239,13 @@ function resetAllData() {
   } catch {}
 }
 
+// Shared confirmation for every destructive "remove" action in the app.
+// Returns true only if the person confirmed — callers should bail out
+// (not perform the delete) when this returns false.
+function confirmDelete(label) {
+  return window.confirm(`Remove ${label}? This can't be undone.`);
+}
+
 // ─── Defaults (used only on first launch) ────────────────────────────────────
 
 const DEFAULT_ACCOUNTS = [];
@@ -496,7 +503,13 @@ const S = `
 
   /* ── Bills ── */
   .bill-list { padding:0 16px; display:flex; flex-direction:column; gap:6px; margin-bottom:80px; }
-  .bill-card { background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:16px 18px; }
+  .bill-card { position:relative; background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:16px 18px; }
+  .card-remove-btn {
+    position:absolute; top:10px; right:10px; width:22px; height:22px;
+    border-radius:6px; border:none; background:#FF453A12; color:#FF453A;
+    font-size:12px; line-height:1; cursor:pointer; display:flex;
+    align-items:center; justify-content:center; z-index:2;
+  }
   .bill-card-top { display:flex; justify-content:space-between; align-items:flex-start; }
   .bill-name { font-size:15px; font-weight:600; color:var(--text); }
   .bill-meta { font-size:12px; color:var(--muted); margin-top:3px; line-height:1.6; }
@@ -582,7 +595,7 @@ const S = `
 
   /* ── Invest ── */
   .invest-list { padding:0 16px; display:flex; flex-direction:column; gap:8px; margin-bottom:80px; }
-  .invest-card { background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:18px; }
+  .invest-card { position:relative; background:var(--card); box-shadow:var(--card-shadow); border-radius:14px; padding:18px; }
   .invest-top  { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:12px; }
   .invest-name { font-size:15px; font-weight:600; color:var(--text); }
   .invest-date { font-size:11px; color:var(--muted); margin-top:3px; }
@@ -1137,11 +1150,14 @@ function ParseRulesPanel({ rules, accounts, onAdd, onDelete, onTogglePriority })
       )}
       {rules.map(rule=>(
         <div key={rule.id} style={{
+          position:"relative",
           background:"var(--card)",borderRadius:14,boxShadow:"var(--card-shadow)",
           padding:"14px 16px",marginBottom:8,
           display:"flex",justifyContent:"space-between",alignItems:"flex-start"
         }}>
-          <div style={{flex:1}}>
+          <button className="card-remove-btn" title="Remove rule"
+            onClick={()=>{ if(confirmDelete(rule.name||"this rule")) onDelete(rule.id); }}>✕</button>
+          <div style={{flex:1, paddingRight:26}}>
             <div style={{fontSize:14,fontWeight:600,color:"var(--text)",marginBottom:3}}>{rule.name}</div>
             <div style={{fontSize:12,color:"var(--muted)",lineHeight:1.6}}>
               {rule.identifierType==="last4"
@@ -1158,11 +1174,6 @@ function ParseRulesPanel({ rules, accounts, onAdd, onDelete, onTogglePriority })
               {rule.priority==="high"?"⬆ High priority":"⬇ Low priority"}
             </button>
           </div>
-          <button onClick={()=>onDelete(rule.id)} style={{
-            background:"#FF453A15",color:"#FF453A",border:"none",
-            borderRadius:8,padding:"5px 10px",fontFamily:"inherit",
-            fontSize:12,fontWeight:600,cursor:"pointer",marginLeft:10,flexShrink:0
-          }}>Remove</button>
         </div>
       ))}
       <button onClick={()=>setShowBuilder(true)} style={{
@@ -1567,6 +1578,16 @@ function parseNum(v) {
   return isNaN(n) ? null : n;
 }
 
+// Defensive integer parse for values coming from CSV/XLSX — spreadsheet
+// software can hand back numbers, strings with stray whitespace, or
+// unexpected formatting. Always falls back to null instead of letting
+// NaN leak into state (which would render as the literal text "NaN").
+function parseIntOrNull(v) {
+  if (v === "" || v === undefined || v === null) return null;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
 function importFromRows(rows, callbacks) {
   const {
     setAccounts, setSnapshots, setBills, setPaycheck,
@@ -1589,8 +1610,8 @@ function importFromRows(rows, callbacks) {
       last4:        r.last4?.trim(),
       label:        r.label?.trim() || "Account",
       role:         r.role?.trim()  || "spending_bank",
-      incomeRank:   r.rank !== "" ? parseInt(r.rank) : null,
-      dueDay:       r.dueDay !== "" ? parseInt(r.dueDay) : null,
+      incomeRank:   parseIntOrNull(r.rank),
+      dueDay:       parseIntOrNull(r.dueDay),
       floatEnabled: r.floatEnabled !== "" ? parseBool(r.floatEnabled) : undefined,
       floatMultiplier: r.floatMultiplier !== "" ? parseNum(r.floatMultiplier) : undefined,
     })).filter(a => a.last4);
@@ -1621,7 +1642,7 @@ function importFromRows(rows, callbacks) {
       fundingAcct: r.fundingAcct?.trim() || "",
       paymentAcct: r.paymentAcct?.trim() || "",
       creditCard:  r.creditCard?.trim() || "",
-      dueDay:      r.dueDay !== "" ? parseInt(r.dueDay) : null,
+      dueDay:      parseIntOrNull(r.dueDay),
       isFixed:     parseBool(r.isFixed) ?? true,
       isAutopay:   parseBool(r.isAutopay) ?? false,
       isEF:        parseBool(r.isEF) ?? false,
@@ -2025,7 +2046,7 @@ function SettingsScreen({ thresholds, thresholdMode,
         <div className="settings-row" style={{flexDirection:"column",alignItems:"stretch",gap:8}}>
           <div className="settings-row-label">Reset to Sample Data</div>
           <div className="settings-row-sub">Clears all saved data and reloads the app with fresh sample accounts, bills, and history.</div>
-          <button onClick={resetAllData}
+          <button onClick={()=>{ if(window.confirm("Reset all app data? This clears every account, bill, and history entry and can't be undone.")) resetAllData(); }}
             style={{marginTop:4,padding:"10px 16px",borderRadius:10,border:"none",
               background:"#FF6B6B18",color:"#FF6B6B",fontFamily:"'DM Sans',sans-serif",
               fontSize:13,fontWeight:600,cursor:"pointer",textAlign:"left"}}>
@@ -3209,6 +3230,8 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
             const monthly = monthlyEquiv(bill) * ((parseFloat(bill.myPct)||100)/100);
             return (
               <div className="bill-card" key={bill.id}>
+                <button className="card-remove-btn" title="Remove bill"
+                  onClick={()=>{ if(confirmDelete(bill.name||"this bill")) onDeleteBill(bill.id); }}>✕</button>
                 <div className="bill-card-top">
                   <div>
                     <div className="bill-name">{bill.name}</div>
@@ -3233,7 +3256,6 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
                 </div>
                 <div className="bill-actions">
                   <button className="bill-action-btn btn-edit" onClick={()=>{setEditingBill(bill);setShowForm(true);}}>Edit</button>
-                  <button className="bill-action-btn btn-delete" onClick={()=>onDeleteBill(bill.id)}>Remove</button>
                 </div>
               </div>
             );
@@ -3260,11 +3282,11 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
                 return (
                   <tr key={bill.id}>
                     <td>
-                      <input className="tbl-input" defaultValue={bill.name}
+                      <input className="tbl-input" key={bill.id+"_name_"+bill.name} defaultValue={bill.name}
                         onBlur={e=>onEditBill({...bill,name:e.target.value})}/>
                     </td>
                     <td>
-                      <input className="tbl-input" style={{width:70}} defaultValue={bill.amount} type="number"
+                      <input className="tbl-input" style={{width:70}} key={bill.id+"_amount_"+bill.amount} defaultValue={bill.amount} type="number"
                         onBlur={e=>onEditBill({...bill,amount:e.target.value})}/>
                     </td>
                     <td>
@@ -3274,13 +3296,13 @@ function BillsScreen({ bills, accounts, onAddBill, onEditBill, onDeleteBill, lat
                       </select>
                     </td>
                     <td>
-                      <input className="tbl-input" style={{width:44}} defaultValue={bill.myPct} type="number"
+                      <input className="tbl-input" style={{width:44}} key={bill.id+"_myPct_"+bill.myPct} defaultValue={bill.myPct} type="number"
                         onBlur={e=>onEditBill({...bill,myPct:e.target.value})}/>
                     </td>
                     <td style={{color:"var(--muted)",fontFamily:"'Space Grotesk',monospace",fontSize:13}}>{fmt(monthly)}</td>
                     <td>
-                      <button style={{background:"none",border:"none",color:"#FF6B6B",cursor:"pointer",fontSize:14}}
-                        onClick={()=>onDeleteBill(bill.id)}>✕</button>
+                      <button style={{background:"none",border:"none",color:"#FF6B6B",cursor:"pointer",fontSize:11,padding:4}}
+                        onClick={()=>{ if(confirmDelete(bill.name||"this bill")) onDeleteBill(bill.id); }}>✕</button>
                     </td>
                   </tr>
                 );
@@ -3588,7 +3610,8 @@ function KataRoadmap({ roadmap, onUpdateRoadmap }) {
                   {!isLast&&<button className="roadmap-btn rmbtn-down" onClick={()=>moveStep(step.id,"down")}>↓</button>}
                   {editId!==step.id&&<button className="roadmap-btn" style={{background:"var(--border)",color:"var(--text2)"}}
                     onClick={()=>{setEditId(step.id);setEditVal(step.label);}}>✎</button>}
-                  <button className="roadmap-btn rmbtn-del" onClick={()=>deleteStep(step.id)}>✕</button>
+                  <button className="roadmap-btn rmbtn-del" style={{marginLeft:6}}
+                    onClick={()=>{ if(confirmDelete(step.label||"this milestone")) deleteStep(step.id); }}>✕</button>
                 </div>
               </div>
             </div>
@@ -3690,6 +3713,8 @@ function InvestScreen({ investments, onAddInvest, onEditInvest, onDeleteInvest }
           const target = inv.targetType === "age" ? `By age ${inv.targetAge}` : inv.targetDate || "No target set";
           return (
             <div className="invest-card" key={inv.id}>
+              <button className="card-remove-btn" title="Remove goal"
+                onClick={()=>{ if(confirmDelete(inv.name||"this goal")) onDeleteInvest(inv.id); }}>✕</button>
               <div className="invest-top">
                 <div>
                   <div className="invest-name">{inv.name}</div>
@@ -3707,7 +3732,6 @@ function InvestScreen({ investments, onAddInvest, onEditInvest, onDeleteInvest }
               {inv.notes && <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>{inv.notes}</div>}
               <div className="invest-actions">
                 <button className="bill-action-btn btn-edit" onClick={()=>{setEditing(inv);setShowForm(true);}}>Edit</button>
-                <button className="bill-action-btn btn-delete" onClick={()=>onDeleteInvest(inv.id)}>Remove</button>
               </div>
             </div>
           );
@@ -3824,7 +3848,7 @@ function AccountsScreen({ accounts, snapshots, onSetRole, onReorder,
                 <div style={{display:"flex",alignItems:"center",gap:10}}>
                   <input className="text-input" style={{maxWidth:80,padding:"7px 10px",fontSize:13}}
                     placeholder="e.g. 15" type="number" inputMode="numeric" min="1" max="31"
-                    defaultValue={a.dueDay??""} key={a.last4+"_due"}
+                    defaultValue={a.dueDay??""} key={a.last4+"_due_"+(a.dueDay??"")}
                     onBlur={e=>onSetDueDay(a.last4,e.target.value||null)}/>
                   <span style={{fontSize:12,color:"var(--muted2)"}}>of each month</span>
                 </div>
@@ -3845,7 +3869,7 @@ function AccountsScreen({ accounts, snapshots, onSetRole, onReorder,
                   <div style={{display:"flex",alignItems:"center",gap:10}}>
                     <input className="text-input" style={{maxWidth:70,padding:"7px 10px",fontSize:13}}
                       placeholder="1.5" type="number" inputMode="decimal" step="0.1"
-                      defaultValue={a.floatMultiplier??1.5} key={a.last4+"_float"}
+                      defaultValue={a.floatMultiplier??1.5} key={a.last4+"_float_"+(a.floatMultiplier??1.5)}
                       onBlur={e=>onSetDueDay(a.last4+"_float",e.target.value||"1.5")}/>
                     <span style={{fontSize:12,color:"var(--muted2)"}}>× monthly flow target</span>
                   </div>
@@ -3854,8 +3878,8 @@ function AccountsScreen({ accounts, snapshots, onSetRole, onReorder,
             )}
 
             {/* Remove */}
-            <button className="pill pill-red" style={{alignSelf:"flex-start"}}
-              onClick={()=>{onRemoveAccount(a.last4);setExpandId(null);}}>
+            <button className="pill pill-red" style={{alignSelf:"flex-start",fontSize:10,padding:"4px 10px"}}
+              onClick={()=>{ if(confirmDelete(a.label||"this account")){ onRemoveAccount(a.last4); setExpandId(null); } }}>
               Remove account
             </button>
           </div>
@@ -4021,6 +4045,8 @@ function HoldingsTab({ accounts, snapshots, investments, latestBalance, investTh
           const target = inv.targetType==="age" ? `By age ${inv.targetAge}` : inv.targetDate||"No target set";
           return (
             <div className="invest-card" key={inv.id}>
+              <button className="card-remove-btn" title="Remove goal"
+                onClick={()=>{ if(confirmDelete(inv.name||"this goal")) onDeleteInvest(inv.id); }}>✕</button>
               <div className="invest-top">
                 <div>
                   <div className="invest-name">{inv.name}</div>
@@ -4036,7 +4062,6 @@ function HoldingsTab({ accounts, snapshots, investments, latestBalance, investTh
               {inv.notes && <div style={{fontSize:12,color:"var(--muted)",marginBottom:10}}>{inv.notes}</div>}
               <div className="invest-actions">
                 <button className="bill-action-btn btn-edit" onClick={()=>{setEditing(inv);setShowForm(true);}}>Edit</button>
-                <button className="bill-action-btn btn-delete" onClick={()=>onDeleteInvest(inv.id)}>Remove</button>
               </div>
             </div>
           );
