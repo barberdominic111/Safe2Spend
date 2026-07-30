@@ -1,4 +1,4 @@
-# Safe2Spend
+# Systems2See-Money
 
 > "How much money can I safely spend right now?"
 
@@ -9,7 +9,7 @@ A privacy-focused cash flow app. No bank logins required. All data stays on your
 ## Folder structure
 
 ```
-safe2spend/
+systems2see-money/
 ├── index.html
 ├── package.json
 ├── vite.config.js
@@ -41,8 +41,8 @@ Open http://localhost:5173 in your browser.
 ```bash
 git init
 git add .
-git commit -m "safe2spend v1.0"
-gh repo create safe2spend --public --push --source=.
+git commit -m "systems2see-money v1.0"
+gh repo create systems2see-money --public --push --source=.
 ```
 Then go to vercel.com → Add New Project → import the repo → Deploy.
 
