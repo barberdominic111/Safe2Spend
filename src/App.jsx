@@ -1234,7 +1234,7 @@ function SpendingScreen({ accounts, snapshots, safeToSpend, residuals, threshold
   return (
     <div className="screen">
       <div className="header">
-        <div className="header-label">Safe2Spend</div>
+        <div className="header-label">Systems2See-Money</div>
         <div className="header-date">{today}</div>
       </div>
 
@@ -1547,7 +1547,7 @@ function exportToCSV(args) {
   const url    = URL.createObjectURL(blob);
   const a      = document.createElement("a");
   a.href       = url;
-  a.download   = `safe2spend_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download   = `systems2see-money_${new Date().toISOString().slice(0,10)}.csv`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -2059,7 +2059,7 @@ function SettingsScreen({ thresholds, thresholdMode,
       <div className="settings-section">
         <div className="settings-row">
           <div>
-            <div className="settings-row-label">Safe2Spend</div>
+            <div className="settings-row-label">Systems2See-Money</div>
             <div className="settings-row-sub">v0.8 · 4 account roles · Bills scale · Swipe nav</div>
           </div>
         </div>
@@ -4148,7 +4148,7 @@ class ErrorBoundary extends Component {
     return { hasError: true, error };
   }
   componentDidCatch(error, info) {
-    console.error("Safe2Spend error:", error, info);
+    console.error("Systems2See-Money error:", error, info);
   }
   render() {
     if (this.state.hasError) {
@@ -4177,7 +4177,7 @@ class ErrorBoundary extends Component {
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-function Safe2SpendApp() {
+function Systems2SeeMoneyApp() {
   const [tab, setTab]               = useState("spending");
   const [theme, setTheme]           = useState(() => {
     const t = localStorage.getItem("s2s_theme");
@@ -4519,7 +4519,7 @@ function Safe2SpendApp() {
 export default function App() {
   return (
     <ErrorBoundary>
-      <Safe2SpendApp />
+      <Systems2SeeMoneyApp />
     </ErrorBoundary>
   );
 }
